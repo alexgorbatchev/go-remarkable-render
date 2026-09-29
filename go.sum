@@ -1,0 +1,12 @@
+github.com/alexgorbatchev/go-rmscene v0.0.0-20260929000558-a1b13482ab8f h1:38Qzn33wAvGKqM9i+ShLixdq2KdxlV+uQKytieT16wE=
+github.com/alexgorbatchev/go-rmscene v0.0.0-20260929000558-a1b13482ab8f/go.mod h1:1e7dL2+AtBl5LjzFqAAIdDYUpO7n2xnYj1c9Ieai/xA=
+github.com/ebitengine/purego v0.10.1 h1:dewVBCBT2GaMu1SrNTYxQhgQBethzfhiwvZiLGP/qyY=
+github.com/ebitengine/purego v0.10.1/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
+github.com/gen2brain/go-fitz v1.28.2 h1:845G85N5TUgnq5oDqyYrW0JvehAkeo35UkkK2dJtW1M=
+github.com/gen2brain/go-fitz v1.28.2/go.mod h1:pY2hqAjp9Zy7qfPI2gwbJMHBFAdZpVXOLrRxD82l3Bs=
+github.com/kanrichan/resvg-go v0.0.1 h1:qXt/ffAcybitiGxELLm40SQ58IW137Fv8WbN/kaooHY=
+github.com/kanrichan/resvg-go v0.0.1/go.mod h1:8duvQiA+s19COisrVUOxxjqNBUvB5y1OUs6P1ujarO0=
+github.com/tetratelabs/wazero v1.4.0 h1:9/MirYvmkJ/zSUOygKY/ia3t+e+RqIZXKbylIby1WYk=
+github.com/tetratelabs/wazero v1.4.0/go.mod h1:0U0G41+ochRKoPKCJlh0jMg1CHkyfK8kDqiirMmKY8A=
+golang.org/x/sys v0.33.0 h1:q3i8TbbEz+JRD9ywIRlyRAQbM0qF7hu24q3teo2hbuw=
+golang.org/x/sys v0.33.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=
