@@ -21,6 +21,10 @@ vet: lint
 # Run checks
 check: test
 
+# Regenerate E2E golden reference render with Python via PEP 723
+generate-golden:
+    uv run testdata/generate_golden.py
+
 # Clean build artifacts and coverage files
 clean:
     rm -rf bin coverage.out coverage.html .tmp *.test
