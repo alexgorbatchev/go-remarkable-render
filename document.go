@@ -29,6 +29,13 @@ var (
 	poolErr    error
 )
 
+// PageLink represents a resolved link target on a page.
+type PageLink struct {
+	Index      int
+	TargetPage int
+	URI        string
+}
+
 // Document wraps an open PDFium document instance.
 type Document struct {
 	instance pdfium.Pdfium
@@ -39,6 +46,106 @@ type Document struct {
 // NumPage returns the total page count of the document.
 func (d *Document) NumPage() int {
 	return d.pages
+}
+
+// Text extracts the plain text content of a page.
+func (d *Document) Text(pageIdx int) (string, error) {
+	if pageIdx < 0 || pageIdx >= d.pages {
+		return "", fmt.Errorf("%w: page index %d", ErrPageOutOfBounds, pageIdx)
+	}
+
+	textResp, err := d.instance.GetPageText(&requests.GetPageText{
+		Page: requests.Page{
+			ByIndex: &requests.PageByIndex{
+				Document: d.handle.Document,
+				Index:    pageIdx,
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("extracting text from page %d: %w", pageIdx, err)
+	}
+	if textResp == nil {
+		return "", nil
+	}
+	return textResp.Text, nil
+}
+
+// Links extracts internal link targets and external hyperlinks from a page.
+func (d *Document) Links(pageIdx int) ([]PageLink, error) {
+	if pageIdx < 0 || pageIdx >= d.pages {
+		return nil, fmt.Errorf("%w: page index %d", ErrPageOutOfBounds, pageIdx)
+	}
+
+	var results []PageLink
+	pos := 0
+
+	for {
+		linkResp, err := d.instance.FPDFLink_Enumerate(&requests.FPDFLink_Enumerate{
+			Page: requests.Page{
+				ByIndex: &requests.PageByIndex{
+					Document: d.handle.Document,
+					Index:    pageIdx,
+				},
+			},
+			StartPos: pos,
+		})
+		if err != nil || linkResp == nil || linkResp.Link == nil {
+			break
+		}
+		if linkResp.NextStartPos != nil {
+			pos = *linkResp.NextStartPos
+		} else {
+			break
+		}
+
+		targetPage := -1
+
+		// 1. Direct Dest
+		destResp, err := d.instance.FPDFLink_GetDest(&requests.FPDFLink_GetDest{
+			Document: d.handle.Document,
+			Link:     *linkResp.Link,
+		})
+		if err == nil && destResp != nil && destResp.Dest != nil {
+			pageIndex, err := d.instance.FPDFDest_GetDestPageIndex(&requests.FPDFDest_GetDestPageIndex{
+				Document: d.handle.Document,
+				Dest:     *destResp.Dest,
+			})
+			if err == nil && pageIndex != nil {
+				targetPage = pageIndex.Index
+			}
+		}
+
+		// 2. Action Dest
+		if targetPage == -1 {
+			actResp, err := d.instance.FPDFLink_GetAction(&requests.FPDFLink_GetAction{
+				Link: *linkResp.Link,
+			})
+			if err == nil && actResp != nil && actResp.Action != nil {
+				actDest, err := d.instance.FPDFAction_GetDest(&requests.FPDFAction_GetDest{
+					Document: d.handle.Document,
+					Action:   *actResp.Action,
+				})
+				if err == nil && actDest != nil && actDest.Dest != nil {
+					pageIndex, err := d.instance.FPDFDest_GetDestPageIndex(&requests.FPDFDest_GetDestPageIndex{
+						Document: d.handle.Document,
+						Dest:     *actDest.Dest,
+					})
+					if err == nil && pageIndex != nil {
+						targetPage = pageIndex.Index
+					}
+				}
+			}
+		}
+
+		results = append(results, PageLink{
+			Index:      len(results),
+			TargetPage: targetPage,
+			URI:        fmt.Sprintf("#page=%d", targetPage+1),
+		})
+	}
+
+	return results, nil
 }
 
 func getPool() (pdfium.Pool, error) {

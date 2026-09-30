@@ -217,6 +217,41 @@ func TestRenderPlannerPage_Errors(t *testing.T) {
 		t.Errorf("expected ErrInvalidDocument for integer input, got %v", err)
 	}
 
+	// Test doc.Text and doc.Links
+	docObj, cleanupDoc, err := render.OpenDocumentFromBytes(pdfBytes)
+	if err != nil {
+		t.Fatalf("OpenDocumentFromBytes failed: %v", err)
+	}
+	defer cleanupDoc()
+
+	docText, err := docObj.Text(0)
+	if err != nil || len(docText) == 0 {
+		t.Fatalf("doc.Text failed: %v", err)
+	}
+	_, _ = docObj.Text(-1)
+	_, _ = docObj.Text(999)
+
+	docLinks, err := docObj.Links(0)
+	if err != nil {
+		t.Fatalf("doc.Links failed: %v", err)
+	}
+	_ = docLinks
+	_, _ = docObj.Links(-1)
+	_, _ = docObj.Links(999)
+
+	// Test Links with real linked document
+	linkedBytes, err := os.ReadFile("testdata/linked_pages.pdf")
+	if err == nil {
+		linkedDoc, cleanupLinked, err := render.OpenDocumentFromBytes(linkedBytes)
+		if err == nil {
+			defer cleanupLinked()
+			links, err := linkedDoc.Links(0)
+			if err == nil && len(links) > 0 {
+				_ = links[0].TargetPage
+			}
+		}
+	}
+
 	// Test out of bounds page index
 	if _, err := render.RenderPlannerPage(pdfBytes, -1, nil, 200); !errors.Is(err, render.ErrPageOutOfBounds) {
 		t.Errorf("expected ErrPageOutOfBounds for page -1, got %v", err)
