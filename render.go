@@ -10,6 +10,7 @@ import (
 
 	"github.com/alexgorbatchev/go-rmscene"
 	"github.com/kanrichan/resvg-go"
+	"github.com/klippa-app/go-pdfium/requests"
 )
 
 const (
@@ -23,7 +24,7 @@ const (
 // and composites the stroke layer over the PDF background using image/draw.
 // Returns the final composited image as encoded PNG bytes.
 //
-// Accepts *fitz.Document, string (file path), []byte, or io.Reader for pdfDocOrPath.
+// Accepts *Document, string (file path), []byte, or io.Reader for pdfDocOrPath.
 func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) ([]byte, error) {
 	if dpi <= 0 {
 		dpi = DefaultDPI
@@ -40,10 +41,19 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	}
 
 	// 1. Render background PDF page to image at target DPI
-	bgImg, err := doc.ImageDPI(pageIdx, float64(dpi))
+	renderResp, err := doc.instance.RenderPageInDPI(&requests.RenderPageInDPI{
+		Page: requests.Page{
+			ByIndex: &requests.PageByIndex{
+				Document: doc.handle.Document,
+				Index:    pageIdx,
+			},
+		},
+		DPI: dpi,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to render PDF page %d at %d DPI: %w", pageIdx, dpi, err)
 	}
+	bgImg := renderResp.Result.Image
 
 	// 2. If no rm stroke bytes are provided, encode and return the background PDF page directly
 	if len(rmBytes) == 0 {
@@ -55,11 +65,18 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	}
 
 	// 3. Obtain page dimensions in points for SVG viewport
-	rect, err := doc.Bound(pageIdx)
+	pageSizeResp, err := doc.instance.GetPageSize(&requests.GetPageSize{
+		Page: requests.Page{
+			ByIndex: &requests.PageByIndex{
+				Document: doc.handle.Document,
+				Index:    pageIdx,
+			},
+		},
+	})
 	var widthPt, heightPt float64
-	if err == nil && rect.Dx() > 0 && rect.Dy() > 0 {
-		widthPt = float64(rect.Dx())
-		heightPt = float64(rect.Dy())
+	if err == nil && pageSizeResp != nil && pageSizeResp.Width > 0 && pageSizeResp.Height > 0 {
+		widthPt = pageSizeResp.Width
+		heightPt = pageSizeResp.Height
 	} else {
 		widthPt = rmscene.DefaultWidthPt
 		heightPt = rmscene.DefaultHeightPt
@@ -98,13 +115,16 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 		return nil, fmt.Errorf("failed to decode stroke PNG: %w", err)
 	}
 
-	// 6. Composite stroke layer over background using image/draw
-	draw.Draw(bgImg, bgBounds, strokeImg, image.Point{}, draw.Over)
+	// 6. Composite strokes over background image
+	finalImg := image.NewRGBA(bgBounds)
+	draw.Draw(finalImg, bgBounds, bgImg, bgBounds.Min, draw.Src)
+	draw.Draw(finalImg, bgBounds, strokeImg, bgBounds.Min, draw.Over)
 
 	// 7. Encode final composited image to PNG
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, bgImg); err != nil {
+	var out bytes.Buffer
+	if err := png.Encode(&out, finalImg); err != nil {
 		return nil, fmt.Errorf("failed to encode composited PNG: %w", err)
 	}
-	return buf.Bytes(), nil
+
+	return out.Bytes(), nil
 }

@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/alexgorbatchev/go-remarkable-render"
-	"github.com/gen2brain/go-fitz"
 )
 
 func TestIndexPlannerDates_Success(t *testing.T) {
@@ -45,11 +44,11 @@ func TestIndexPlannerDates_Success(t *testing.T) {
 		[]string{"Jan 15 Wednesday Overview"},
 	)
 
-	doc, err := fitz.NewFromMemory(pdfBytes)
+	doc, cleanup, err := render.OpenDocumentFromBytes(pdfBytes)
 	if err != nil {
-		t.Fatalf("fitz.NewFromMemory failed: %v", err)
+		t.Fatalf("render.OpenDocumentFromBytes failed: %v", err)
 	}
-	defer doc.Close()
+	defer cleanup()
 
 	// 1. Test indexing from []byte
 	indexed, err := render.IndexPlannerDates(pdfBytes, 2026)
@@ -85,10 +84,10 @@ func TestIndexPlannerDates_Success(t *testing.T) {
 		}
 	}
 
-	// 2. Test indexing from *fitz.Document
+	// 2. Test indexing from *render.Document
 	indexedFromDoc, err := render.IndexPlannerDates(doc, 2026)
 	if err != nil {
-		t.Fatalf("IndexPlannerDates from *fitz.Document failed: %v", err)
+		t.Fatalf("IndexPlannerDates from *render.Document failed: %v", err)
 	}
 	if len(indexedFromDoc) != len(indexed) {
 		t.Errorf("expected %d indexed dates from doc, got %d", len(indexed), len(indexedFromDoc))
@@ -132,10 +131,10 @@ func TestIndexPlannerDates_Errors(t *testing.T) {
 		t.Errorf("expected ErrInvalidYear for 0, got: %v", err)
 	}
 
-	// Nil fitz.Document
-	var nilDoc *fitz.Document
+	// Nil render.Document
+	var nilDoc *render.Document
 	if _, err := render.IndexPlannerDates(nilDoc, 2026); !errors.Is(err, render.ErrInvalidDocument) {
-		t.Errorf("expected ErrInvalidDocument for nil *fitz.Document, got: %v", err)
+		t.Errorf("expected ErrInvalidDocument for nil *render.Document, got: %v", err)
 	}
 
 	// Unsupported type

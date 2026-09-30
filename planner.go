@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/klippa-app/go-pdfium/requests"
 )
 
 var months = map[string]int{
@@ -20,7 +22,7 @@ var weekdays = map[string]bool{
 // indexes dates matching "Month Day Weekday Notes/Day" into a nested mapping:
 // map[YYYY-MM-DD]map[day|notes]pageIdx.
 //
-// Accepts *fitz.Document, string (file path), []byte, or io.Reader.
+// Accepts *Document, string (file path), []byte, or io.Reader.
 // For each matching date:
 // - A page containing "Notes" in its header represents the "day" view (pointing to its notes companion).
 // - A page containing "Day" in its header represents the "notes" view (pointing back to its day companion).
@@ -39,10 +41,18 @@ func IndexPlannerDates(pdfDocOrPath any, year int) (map[string]map[string]int, e
 	numPages := doc.NumPage()
 
 	for idx := 0; idx < numPages; idx++ {
-		text, err := doc.Text(idx)
-		if err != nil {
+		textResp, err := doc.instance.GetPageText(&requests.GetPageText{
+			Page: requests.Page{
+				ByIndex: &requests.PageByIndex{
+					Document: doc.handle.Document,
+					Index:    idx,
+				},
+			},
+		})
+		if err != nil || textResp == nil {
 			continue
 		}
+		text := textResp.Text
 
 		tokens := strings.Fields(text)
 		if len(tokens) < 3 {
@@ -79,20 +89,19 @@ func IndexPlannerDates(pdfDocOrPath any, year int) (map[string]map[string]int, e
 			continue
 		}
 
-		var kind string
-		if hasNotes {
-			kind = "day"
-		} else if hasDay {
-			kind = "notes"
-		} else {
-			continue
-		}
+		dateKey := fmt.Sprintf("%04d-%02d-%02d", year, monthIdx, dayNum)
 
-		dateStr := fmt.Sprintf("%04d-%02d-%02d", year, monthIdx, dayNum)
-		if indexed[dateStr] == nil {
-			indexed[dateStr] = make(map[string]int)
+		if hasNotes {
+			if _, ok := indexed[dateKey]; !ok {
+				indexed[dateKey] = make(map[string]int)
+			}
+			indexed[dateKey]["day"] = idx
+		} else if hasDay {
+			if _, ok := indexed[dateKey]; !ok {
+				indexed[dateKey] = make(map[string]int)
+			}
+			indexed[dateKey]["notes"] = idx
 		}
-		indexed[dateStr][kind] = idx
 	}
 
 	return indexed, nil

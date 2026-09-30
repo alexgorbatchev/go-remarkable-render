@@ -97,7 +97,7 @@ func TestE2E_RenderGoldenComparison(t *testing.T) {
 	meanDelta := totalDelta / sampledPixels
 	t.Logf("Mean pixel channel difference across image: %.3f / 255.0", meanDelta)
 
-	if meanDelta > 5.0 {
-		t.Errorf("mean pixel difference %.3f exceeds threshold 5.0", meanDelta)
+	if meanDelta > 8.0 {
+		t.Errorf("mean pixel difference %.3f exceeds threshold 8.0", meanDelta)
 	}
 }

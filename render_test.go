@@ -9,8 +9,13 @@ import (
 	"testing"
 
 	"github.com/alexgorbatchev/go-remarkable-render"
-	"github.com/gen2brain/go-fitz"
 )
+
+type errReader struct{}
+
+func (e *errReader) Read(p []byte) (n int, err error) {
+	return 0, errors.New("reader failure")
+}
 
 func TestRenderPlannerPage_EmptyStrokes(t *testing.T) {
 	pdfBytes := buildMinimalPDF(
@@ -126,19 +131,19 @@ func TestRenderPlannerPage_DocumentInputs(t *testing.T) {
 		t.Fatalf("failed to build sample strokes: %v", err)
 	}
 
-	// 1. *fitz.Document
-	doc, err := fitz.NewFromMemory(pdfBytes)
+	// 1. *render.Document
+	doc, cleanup, err := render.OpenDocumentFromBytes(pdfBytes)
 	if err != nil {
-		t.Fatalf("fitz.NewFromMemory failed: %v", err)
+		t.Fatalf("render.OpenDocumentFromBytes failed: %v", err)
 	}
-	defer doc.Close()
+	defer cleanup()
 
 	pngDoc, err := render.RenderPlannerPage(doc, 0, rmBytes, 100)
 	if err != nil {
-		t.Fatalf("render from *fitz.Document failed: %v", err)
+		t.Fatalf("render from *render.Document failed: %v", err)
 	}
 	if len(pngDoc) == 0 {
-		t.Fatal("empty PNG from *fitz.Document")
+		t.Fatal("empty PNG from *render.Document")
 	}
 
 	// 2. File path
@@ -184,10 +189,51 @@ func TestRenderPlannerPage_Errors(t *testing.T) {
 		t.Errorf("expected ErrInvalidDocument for bool, got: %v", err)
 	}
 
-	// Nil fitz.Document
-	var nilDoc *fitz.Document
+	// Test dpi <= 0 fallback
+	pngDefaultDPI, err := render.RenderPlannerPage(pdfBytes, 0, nil, 0)
+	if err != nil || len(pngDefaultDPI) == 0 {
+		t.Fatalf("expected valid PNG with dpi <= 0: %v", err)
+	}
+
+	// OpenDocumentFromBytes invalid data
+	_, _, errBadPDF := render.OpenDocumentFromBytes([]byte("not a pdf"))
+	if errBadPDF == nil {
+		t.Error("expected error for invalid PDF bytes")
+	}
+
+	// Test invalid rm bytes error
+	_, errBadStrokes := render.RenderPlannerPage(pdfBytes, 0, []byte("invalid rm strokes"), 200)
+	if errBadStrokes == nil {
+		t.Error("expected error for invalid rm stroke bytes")
+	}
+
+	// Test invalid year in IndexPlannerDates
+	if _, err := render.IndexPlannerDates(pdfBytes, 0); !errors.Is(err, render.ErrInvalidYear) {
+		t.Errorf("expected ErrInvalidYear for year 0, got %v", err)
+	}
+
+	// Test invalid document type
+	if _, err := render.IndexPlannerDates(12345, 2026); !errors.Is(err, render.ErrInvalidDocument) {
+		t.Errorf("expected ErrInvalidDocument for integer input, got %v", err)
+	}
+
+	// Test out of bounds page index
+	if _, err := render.RenderPlannerPage(pdfBytes, -1, nil, 200); !errors.Is(err, render.ErrPageOutOfBounds) {
+		t.Errorf("expected ErrPageOutOfBounds for page -1, got %v", err)
+	}
+	if _, err := render.RenderPlannerPage(pdfBytes, 999, nil, 200); !errors.Is(err, render.ErrPageOutOfBounds) {
+		t.Errorf("expected ErrPageOutOfBounds for page 999, got %v", err)
+	}
+
+	// Test failing reader
+	if _, err := render.RenderPlannerPage(&errReader{}, 0, nil, 200); err == nil {
+		t.Error("expected error for failing reader")
+	}
+
+	// Nil render.Document
+	var nilDoc *render.Document
 	if _, err := render.RenderPlannerPage(nilDoc, 0, nil, 100); !errors.Is(err, render.ErrInvalidDocument) {
-		t.Errorf("expected ErrInvalidDocument for nil *fitz.Document, got: %v", err)
+		t.Errorf("expected ErrInvalidDocument for nil *render.Document, got: %v", err)
 	}
 
 	// Non-existent file
