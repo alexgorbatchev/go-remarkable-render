@@ -1,7 +1,3 @@
-github.com/alexgorbatchev/go-rmscene v0.0.0-20260929000558-a1b13482ab8f h1:38Qzn33wAvGKqM9i+ShLixdq2KdxlV+uQKytieT16wE=
-github.com/alexgorbatchev/go-rmscene v0.0.0-20260929000558-a1b13482ab8f/go.mod h1:1e7dL2+AtBl5LjzFqAAIdDYUpO7n2xnYj1c9Ieai/xA=
-github.com/alexgorbatchev/go-rmscene v0.0.0-20260929142131-a84de5190745 h1:R9tE0sT7Rl5nO+eTI030uh+BlRiP7OwKfpUr0nihiiY=
-github.com/alexgorbatchev/go-rmscene v0.0.0-20260929142131-a84de5190745/go.mod h1:1e7dL2+AtBl5LjzFqAAIdDYUpO7n2xnYj1c9Ieai/xA=
 github.com/alexgorbatchev/go-rmscene v0.0.0-20260929164147-03ef03e1e1ac h1:vhjFtACPpXod5PuLi6RmMrXXLI1yqgIwZ3GkLG6Ol9E=
 github.com/alexgorbatchev/go-rmscene v0.0.0-20260929164147-03ef03e1e1ac/go.mod h1:1e7dL2+AtBl5LjzFqAAIdDYUpO7n2xnYj1c9Ieai/xA=
 github.com/corona10/goimagehash v1.1.0 h1:teNMX/1e+Wn/AYSbLHX8mj+mF9r60R1kBeqE9MkoYwI=
