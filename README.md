@@ -70,6 +70,9 @@ func main() {
 | :--- | :--- | :--- |
 | `RenderPlannerPage` | `(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) ([]byte, error)` | Composites a page with strokes to PNG bytes |
 | `IndexPlannerDates` | `(pdfDocOrPath any, year int) (map[string]map[string]int, error)` | Indexes annual planner PDF dates to page indices |
+| `OpenDocumentFromBytes` | `(data []byte) (*Document, func(), error)` | Opens a PDF for reuse across calls; call the returned function to release it. Returns an error, and releases everything it acquired, when the PDF cannot be opened or its page count cannot be read |
+| `Document.Text` | `(pageIdx int) (string, error)` | Returns the plain text of a 0-based page, or `""` when the page has no text. Returns `ErrPageOutOfBounds` for an invalid index and an error when a PDFium request fails |
+| `Document.Links` | `(pageIdx int) ([]PageLink, error)` | Returns the link annotations of a 0-based page in order. `TargetPage` is the 0-based destination page, or `-1` for a link without an in-document destination. A page without links returns an empty list; a failed PDFium request returns an error and no links |
 | `DefaultDPI` | `const int = 200` | Standard default rendering resolution in dots per inch |
 
 # Configuration

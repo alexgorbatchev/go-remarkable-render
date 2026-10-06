@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 
@@ -84,11 +83,32 @@ func (f fault) String() string {
 }
 
 // faultInjectingPdfium forwards every call to a real PDFium instance except
-// the one named method, which fails with the configured fault.
+// the one named method, which fails with the configured fault. It records
+// whether the document and the instance were closed.
 type faultInjectingPdfium struct {
 	pdfium.Pdfium
-	method string
-	fault  fault
+	method         string
+	fault          fault
+	documentClosed bool
+	instanceClosed bool
+}
+
+func (f *faultInjectingPdfium) OpenDocument(req *requests.OpenDocument) (*responses.OpenDocument, error) {
+	return inject(f, "OpenDocument", req, f.Pdfium.OpenDocument)
+}
+
+func (f *faultInjectingPdfium) FPDF_GetPageCount(req *requests.FPDF_GetPageCount) (*responses.FPDF_GetPageCount, error) {
+	return inject(f, "FPDF_GetPageCount", req, f.Pdfium.FPDF_GetPageCount)
+}
+
+func (f *faultInjectingPdfium) FPDF_CloseDocument(req *requests.FPDF_CloseDocument) (*responses.FPDF_CloseDocument, error) {
+	f.documentClosed = true
+	return f.Pdfium.FPDF_CloseDocument(req)
+}
+
+func (f *faultInjectingPdfium) Close() error {
+	f.instanceClosed = true
+	return f.Pdfium.Close()
 }
 
 func inject[Req, Resp any](f *faultInjectingPdfium, method string, req Req, call func(Req) (*Resp, error)) (*Resp, error) {
@@ -136,24 +156,16 @@ func TestDocumentLinks_ResolvesTargets(t *testing.T) {
 	doc, cleanup := openLinkPDF(t)
 	defer cleanup()
 
+	// The URI of a link without an in-document target is not asserted: it is
+	// not a page anchor and is defined separately from target resolution.
 	tests := []struct {
-		name string
-		page int
-		want []PageLink
+		name        string
+		page        int
+		wantTargets []int
 	}{
-		{
-			name: "direct and action destinations",
-			page: linkSourcePage,
-			want: []PageLink{
-				{Index: 0, TargetPage: linkTargetPage, URI: "#page=2"},
-				{Index: 1, TargetPage: linkTargetPage, URI: "#page=2"},
-			},
-		},
-		{
-			name: "page without links",
-			page: linkTargetPage,
-			want: nil,
-		},
+		{"direct and action destinations", linkSourcePage, []int{linkTargetPage, linkTargetPage}},
+		{"page without links", linkTargetPage, nil},
+		{"uri action without destination", uriLinkPage, []int{noTargetPage}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -161,8 +173,17 @@ func TestDocumentLinks_ResolvesTargets(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Links(%d) error = %v, want nil", tt.page, err)
 			}
-			if !slices.Equal(got, tt.want) {
-				t.Fatalf("Links(%d) = %+v, want %+v", tt.page, got, tt.want)
+			if len(got) != len(tt.wantTargets) {
+				t.Fatalf("Links(%d) = %+v, want %d links", tt.page, got, len(tt.wantTargets))
+			}
+			for i, target := range tt.wantTargets {
+				link := got[i]
+				if link.Index != i || link.TargetPage != target {
+					t.Fatalf("Links(%d)[%d] = %+v, want Index %d TargetPage %d", tt.page, i, link, i, target)
+				}
+				if wantURI := fmt.Sprintf("#page=%d", target+1); target != noTargetPage && link.URI != wantURI {
+					t.Fatalf("Links(%d)[%d].URI = %q, want %q", tt.page, i, link.URI, wantURI)
+				}
 			}
 		})
 	}
@@ -218,6 +239,55 @@ func TestDocumentLinks_RequestFailures(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), fmt.Sprintf("page %d", tt.page)) {
 				t.Fatalf("Links(%d) with failing %s error = %q, want page context", tt.page, tt.method, err)
+			}
+		})
+	}
+}
+
+func TestOpenDocument_RequestFailures(t *testing.T) {
+	pool, err := getPool()
+	if err != nil {
+		t.Fatalf("getPool: %v", err)
+	}
+
+	// The OpenDocument nil-response row runs last: without a nil check it
+	// dereferences the missing response and panics.
+	tests := []struct {
+		method             string
+		fault              fault
+		want               error
+		wantDocumentClosed bool
+	}{
+		{"FPDF_GetPageCount", faultError, errInjected, true},
+		{"FPDF_GetPageCount", faultNilResponse, errMissingResponse, true},
+		{"OpenDocument", faultError, errInjected, false},
+		{"OpenDocument", faultNilResponse, errMissingResponse, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+"/"+tt.fault.String(), func(t *testing.T) {
+			instance, err := pool.GetInstance(instanceTimeout)
+			if err != nil {
+				t.Fatalf("GetInstance: %v", err)
+			}
+			f := &faultInjectingPdfium{Pdfium: instance, method: tt.method, fault: tt.fault}
+
+			doc, cleanup, err := openDocument(f, buildLinkPDF())
+			if err == nil {
+				cleanup()
+				t.Fatalf("openDocument with failing %s = %d pages, nil error; want error wrapping %v", tt.method, doc.NumPage(), tt.want)
+			}
+			if !f.instanceClosed {
+				_ = instance.Close() // release the pool slot so later tests can run
+				t.Fatalf("openDocument with failing %s did not close the instance", tt.method)
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("openDocument with failing %s error = %v, want wrapping %v", tt.method, err, tt.want)
+			}
+			if doc != nil || cleanup != nil {
+				t.Fatalf("openDocument with failing %s returned a document or cleanup function", tt.method)
+			}
+			if f.documentClosed != tt.wantDocumentClosed {
+				t.Fatalf("openDocument with failing %s closed document = %t, want %t", tt.method, f.documentClosed, tt.wantDocumentClosed)
 			}
 		})
 	}

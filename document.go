@@ -33,8 +33,13 @@ var (
 	poolErr    error
 )
 
-// noTargetPage is the TargetPage of a link without an in-document destination.
-const noTargetPage = -1
+const (
+	// noTargetPage is the TargetPage of a link without an in-document destination.
+	noTargetPage = -1
+
+	// instanceTimeout bounds the wait for a free instance in the PDFium pool.
+	instanceTimeout = 30 * time.Second
+)
 
 // PageLink represents a resolved link target on a page.
 type PageLink struct {
@@ -55,7 +60,9 @@ func (d *Document) NumPage() int {
 	return d.pages
 }
 
-// Text extracts the plain text content of a page.
+// Text extracts the plain text content of a page. A page without text yields
+// an empty string and a nil error. A failed PDFium request, including one that
+// returns no response, returns an error.
 func (d *Document) Text(pageIdx int) (string, error) {
 	if pageIdx < 0 || pageIdx >= d.pages {
 		return "", fmt.Errorf("%w: page index %d", ErrPageOutOfBounds, pageIdx)
@@ -199,43 +206,51 @@ func getPool() (pdfium.Pool, error) {
 	return pdfiumPool, poolErr
 }
 
-// OpenDocumentFromBytes opens a PDF document from raw byte slice using PDFium WebAssembly.
+// OpenDocumentFromBytes opens a PDF document from raw byte slice using PDFium
+// WebAssembly. Call the returned cleanup function to release the document. A
+// failure to open the document or to read its page count returns an error and
+// releases everything acquired.
 func OpenDocumentFromBytes(data []byte) (*Document, func(), error) {
 	pool, err := getPool()
 	if err != nil {
 		return nil, nil, fmt.Errorf("initializing pdfium pool: %w", err)
 	}
 
-	instance, err := pool.GetInstance(30 * time.Second)
+	instance, err := pool.GetInstance(instanceTimeout)
 	if err != nil {
 		return nil, nil, fmt.Errorf("acquiring pdfium instance: %w", err)
 	}
+	return openDocument(instance, data)
+}
 
-	doc, err := instance.OpenDocument(&requests.OpenDocument{
+// openDocument opens data on instance and takes ownership of instance: it is
+// closed when opening fails, or by the returned cleanup function.
+func openDocument(instance pdfium.Pdfium, data []byte) (*Document, func(), error) {
+	doc, err := pdfiumResponse(instance.OpenDocument(&requests.OpenDocument{
 		File: &data,
-	})
+	}))
 	if err != nil {
-		_ = instance.Close()
+		_ = instance.Close() // best-effort release; the open error is what the caller needs
 		return nil, nil, fmt.Errorf("opening PDF document: %w", err)
-	}
-
-	countResp, _ := instance.FPDF_GetPageCount(&requests.FPDF_GetPageCount{
-		Document: doc.Document,
-	})
-	pageCount := 0
-	if countResp != nil {
-		pageCount = countResp.PageCount
-	}
-
-	d := &Document{
-		instance: instance,
-		handle:   doc,
-		pages:    pageCount,
 	}
 
 	cleanup := func() {
 		_, _ = instance.FPDF_CloseDocument(&requests.FPDF_CloseDocument{Document: doc.Document})
 		_ = instance.Close()
+	}
+
+	countResp, err := pdfiumResponse(instance.FPDF_GetPageCount(&requests.FPDF_GetPageCount{
+		Document: doc.Document,
+	}))
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("counting PDF pages: %w", err)
+	}
+
+	d := &Document{
+		instance: instance,
+		handle:   doc,
+		pages:    countResp.PageCount,
 	}
 
 	return d, cleanup, nil
