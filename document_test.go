@@ -4,20 +4,50 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/klippa-app/go-pdfium"
+	"github.com/klippa-app/go-pdfium/references"
 	"github.com/klippa-app/go-pdfium/requests"
 	"github.com/klippa-app/go-pdfium/responses"
 )
 
 const (
-	linkSourcePage = 0
-	linkTargetPage = 1
-	actionLinkPage = 2
+	linkSourcePage   = 0
+	linkTargetPage   = 1
+	actionLinkPage   = 2
+	labelledLinkPage = 3
+	missingRectPage  = 4
 )
+
+// labelledPageContent draws 12pt Helvetica words at known baselines on
+// labelledLinkPage. Each word's advance width follows from the standard
+// Helvetica metrics (in 1/1000 em): "Partial" starts at x=20, so "P" (667)
+// spans 20-28.0 and "a" (556) spans 28.0-34.7; "Mon Tue" starts at x=100, so
+// "Mon" (1945) spans 100-123.3 and the space (278) spans 123.3-126.7; "Year"
+// sits on baseline 50 and "2026" on baseline 36. "AB" uses font F2, whose
+// astralToUnicodeCMap maps "A" to astralText's first code point.
+const labelledPageContent = "BT /F1 12 Tf 20 150 Td (Notes) Tj ET\n" +
+	"BT /F1 12 Tf 100 150 Td (Standup) Tj ET\n" +
+	"BT /F1 12 Tf 20 100 Td (Partial) Tj ET\n" +
+	"BT /F1 12 Tf 100 100 Td (Mon Tue) Tj ET\n" +
+	"BT /F1 12 Tf 20 50 Td (Year) Tj 0 -14 Td (2026) Tj ET\n" +
+	"BT /F1 12 Tf 100 50 Td (Back) Tj ET\n" +
+	"BT /F2 12 Tf 100 15 Td (AB) Tj ET\n"
+
+// astralText is the text of "AB" in font F2: U+1F600, outside the Basic
+// Multilingual Plane so PDFium reports it as a UTF-16 surrogate pair, and "B".
+const astralText = "\U0001F600B"
+
+// astralToUnicodeCMap is the /ToUnicode CMap of font F2.
+const astralToUnicodeCMap = "/CIDInit /ProcSet findresource begin\n" +
+	"12 dict begin\nbegincmap\n/CMapName /Astral def\n/CMapType 2 def\n" +
+	"1 begincodespacerange <00> <FF> endcodespacerange\n" +
+	"2 beginbfchar\n<41> <D83DDE00>\n<42> <0042>\nendbfchar\n" +
+	"endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
 
 // URIs of the action links on actionLinkPage, as the PDF strings encode them
 // and as Links must report them. The absolute URI carries the UTF-8 bytes of
@@ -36,11 +66,14 @@ const (
 	invalidUTF8URIPDF = "https://example.com/\\377"
 )
 
-// buildLinkPDF builds a three-page PDF whose catalog carries /URI /Base base,
+// buildLinkPDF builds a five-page PDF whose catalog carries /URI /Base base,
 // or no /URI dictionary when base is empty. Page 0 carries two link
 // annotations to page 1: one with a direct /Dest and one with a /GoTo action.
 // Page 1 has no annotations. Page 2 carries the links actionPageLinks
-// describes, none of which has an in-document destination.
+// describes, none of which has an in-document destination. Pages 0-2 have no
+// content, so no link there covers text. Page 3 draws labelledPageContent and
+// carries the links labelledPageLinks describes; link 5 gives its /Rect
+// corners in reverse order. Page 4 carries a link without a /Rect.
 func buildLinkPDF(base string) []byte {
 	catalog := "<< /Type /Catalog /Pages 2 0 R >>"
 	if base != "" {
@@ -48,7 +81,7 @@ func buildLinkPDF(base string) []byte {
 	}
 	objects := []string{
 		catalog,
-		"<< /Type /Pages /Kids [3 0 R 4 0 R 7 0 R] /Count 3 >>",
+		"<< /Type /Pages /Kids [3 0 R 4 0 R 7 0 R 19 0 R 28 0 R] /Count 5 >>",
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [5 0 R 6 0 R] >>",
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
 		"<< /Type /Annot /Subtype /Link /Rect [10 10 50 50] /Dest [4 0 R /Fit] >>",
@@ -65,6 +98,20 @@ func buildLinkPDF(base string) []byte {
 		"<< /Type /Annot /Subtype /Link /Rect [110 110 150 150] /A << /S /URI /URI (" + colonRelativeURI + ") >> >>",
 		"<< /Type /Annot /Subtype /Link /Rect [10 160 50 200] /A << /S /URI /URI (" + leadingColonURI + ") >> >>",
 		"<< /Type /Annot /Subtype /Link /Rect [60 160 100 200] /A << /S /URI /URI (" + invalidUTF8URIPDF + ") >> >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 21 0 R /F2 30 0 R >> >> /Contents 20 0 R /Annots [22 0 R 23 0 R 24 0 R 25 0 R 26 0 R 27 0 R 32 0 R] >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(labelledPageContent), labelledPageContent),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		"<< /Type /Annot /Subtype /Link /Rect [15 145 60 165] /Dest [4 0 R /Fit] >>",
+		"<< /Type /Annot /Subtype /Link /Rect [95 145 150 165] /A << /S /GoTo /D [4 0 R /Fit] >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [15 95 31 115] /A << /S /URI /URI (" + relativeURI + ") >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [95 95 124.5 115] /Dest [4 0 R /Fit] >>",
+		"<< /Type /Annot /Subtype /Link /Rect [15 30 60 65] /Dest [3 0 R /Fit] >>",
+		"<< /Type /Annot /Subtype /Link /Rect [150.25 65.5 95.75 45] /Dest [4 0 R /Fit] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [29 0 R] >>",
+		"<< /Type /Annot /Subtype /Link /Dest [4 0 R /Fit] >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 31 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(astralToUnicodeCMap), astralToUnicodeCMap),
+		"<< /Type /Annot /Subtype /Link /Rect [95 10 150 30] /Dest [4 0 R /Fit] >>",
 	}
 
 	var buf bytes.Buffer
@@ -90,17 +137,38 @@ func buildLinkPDF(base string) []byte {
 // with ':'.
 func actionPageLinks(basePrefix string) []PageLink {
 	return []PageLink{
-		{Index: 0, TargetPage: noTargetPage, URI: absoluteURI},
-		{Index: 1, TargetPage: noTargetPage, URI: basePrefix + relativeURI},
-		{Index: 2, TargetPage: noTargetPage, URI: ""},
-		{Index: 3, TargetPage: noTargetPage, URI: ""},
-		{Index: 4, TargetPage: noTargetPage, URI: ""},
-		{Index: 5, TargetPage: noTargetPage, URI: ""},
-		{Index: 6, TargetPage: noTargetPage, URI: basePrefix},
-		{Index: 7, TargetPage: noTargetPage, URI: ""},
-		{Index: 8, TargetPage: noTargetPage, URI: colonRelativeURI},
-		{Index: 9, TargetPage: noTargetPage, URI: basePrefix + leadingColonURI},
-		{Index: 10, TargetPage: noTargetPage, URI: invalidUTF8URI},
+		{Index: 0, TargetPage: noTargetPage, URI: absoluteURI, Rect: Rect{Left: 10, Bottom: 10, Right: 50, Top: 50}},
+		{Index: 1, TargetPage: noTargetPage, URI: basePrefix + relativeURI, Rect: Rect{Left: 60, Bottom: 10, Right: 100, Top: 50}},
+		{Index: 2, TargetPage: noTargetPage, URI: "", Rect: Rect{Left: 110, Bottom: 10, Right: 150, Top: 50}},
+		{Index: 3, TargetPage: noTargetPage, URI: "", Rect: Rect{Left: 10, Bottom: 60, Right: 50, Top: 100}},
+		{Index: 4, TargetPage: noTargetPage, URI: "", Rect: Rect{Left: 60, Bottom: 60, Right: 100, Top: 100}},
+		{Index: 5, TargetPage: noTargetPage, URI: "", Rect: Rect{Left: 110, Bottom: 60, Right: 150, Top: 100}},
+		{Index: 6, TargetPage: noTargetPage, URI: basePrefix, Rect: Rect{Left: 10, Bottom: 110, Right: 50, Top: 150}},
+		{Index: 7, TargetPage: noTargetPage, URI: "", Rect: Rect{Left: 60, Bottom: 110, Right: 100, Top: 150}},
+		{Index: 8, TargetPage: noTargetPage, URI: colonRelativeURI, Rect: Rect{Left: 110, Bottom: 110, Right: 150, Top: 150}},
+		{Index: 9, TargetPage: noTargetPage, URI: basePrefix + leadingColonURI, Rect: Rect{Left: 10, Bottom: 160, Right: 50, Top: 200}},
+		{Index: 10, TargetPage: noTargetPage, URI: invalidUTF8URI, Rect: Rect{Left: 60, Bottom: 160, Right: 100, Top: 200}},
+	}
+}
+
+// labelledPageLinks returns the links Links must report for labelledLinkPage
+// in a document whose catalog has /URI /Base uriBase. PDFium reports every
+// character whose box overlaps the rectangle, so link 2 yields the whole "a"
+// although its rectangle ends inside it. PDFium's raw text is "Notes " for
+// link 0 and "Mon " for link 3, with the following space outside the
+// rectangle, and "Year\r\n2026" for link 4; Links collapses and trims that
+// white space. Link 5's /Rect lists its corners in reverse order. Link 6
+// covers astralText, which Links reports as UTF-8.
+func labelledPageLinks() []PageLink {
+	internalURI := fmt.Sprintf("#page=%d", linkTargetPage+1)
+	return []PageLink{
+		{Index: 0, TargetPage: linkTargetPage, URI: internalURI, Rect: Rect{Left: 15, Bottom: 145, Right: 60, Top: 165}, Text: "Notes"},
+		{Index: 1, TargetPage: linkTargetPage, URI: internalURI, Rect: Rect{Left: 95, Bottom: 145, Right: 150, Top: 165}, Text: "Standup"},
+		{Index: 2, TargetPage: noTargetPage, URI: uriBase + relativeURI, Rect: Rect{Left: 15, Bottom: 95, Right: 31, Top: 115}, Text: "Pa"},
+		{Index: 3, TargetPage: linkTargetPage, URI: internalURI, Rect: Rect{Left: 95, Bottom: 95, Right: 124.5, Top: 115}, Text: "Mon"},
+		{Index: 4, TargetPage: linkSourcePage, URI: fmt.Sprintf("#page=%d", linkSourcePage+1), Rect: Rect{Left: 15, Bottom: 30, Right: 60, Top: 65}, Text: "Year 2026"},
+		{Index: 5, TargetPage: linkTargetPage, URI: internalURI, Rect: Rect{Left: 95.75, Bottom: 45, Right: 150.25, Top: 65.5}, Text: "Back"},
+		{Index: 6, TargetPage: linkTargetPage, URI: internalURI, Rect: Rect{Left: 95, Bottom: 10, Right: 150, Top: 30}, Text: astralText},
 	}
 }
 
@@ -122,6 +190,7 @@ const (
 	faultNilResponse
 	faultMissingNextStartPos
 	faultMissingURIPath
+	faultMissingRect
 )
 
 func (f fault) String() string {
@@ -134,19 +203,23 @@ func (f fault) String() string {
 		return "missing-next-start-pos"
 	case faultMissingURIPath:
 		return "missing-uri-path"
+	case faultMissingRect:
+		return "missing-rect"
 	}
 	return fmt.Sprintf("fault(%d)", int(f))
 }
 
 // faultInjectingPdfium forwards every call to a real PDFium instance except
 // the one named method, which fails with the configured fault. It records
-// whether the document and the instance were closed.
+// whether the document and the instance were closed, and which text pages are
+// loaded and not yet closed.
 type faultInjectingPdfium struct {
 	pdfium.Pdfium
 	method         string
 	fault          fault
 	documentClosed bool
 	instanceClosed bool
+	openTextPages  map[references.FPDF_TEXTPAGE]bool
 }
 
 func (f *faultInjectingPdfium) OpenDocument(req *requests.OpenDocument) (*responses.OpenDocument, error) {
@@ -220,6 +293,41 @@ func (f *faultInjectingPdfium) FPDFAction_GetURIPath(req *requests.FPDFAction_Ge
 	return resp, err
 }
 
+func (f *faultInjectingPdfium) FPDFLink_GetAnnotRect(req *requests.FPDFLink_GetAnnotRect) (*responses.FPDFLink_GetAnnotRect, error) {
+	resp, err := inject(f, "FPDFLink_GetAnnotRect", req, f.Pdfium.FPDFLink_GetAnnotRect)
+	if f.method == "FPDFLink_GetAnnotRect" && f.fault == faultMissingRect && resp != nil {
+		resp.Rect = nil
+	}
+	return resp, err
+}
+
+func (f *faultInjectingPdfium) FPDFText_LoadPage(req *requests.FPDFText_LoadPage) (*responses.FPDFText_LoadPage, error) {
+	resp, err := inject(f, "FPDFText_LoadPage", req, f.Pdfium.FPDFText_LoadPage)
+	if err == nil && resp != nil {
+		if f.openTextPages == nil {
+			f.openTextPages = map[references.FPDF_TEXTPAGE]bool{}
+		}
+		f.openTextPages[resp.TextPage] = true
+	}
+	return resp, err
+}
+
+func (f *faultInjectingPdfium) FPDFText_GetBoundedText(req *requests.FPDFText_GetBoundedText) (*responses.FPDFText_GetBoundedText, error) {
+	return inject(f, "FPDFText_GetBoundedText", req, f.Pdfium.FPDFText_GetBoundedText)
+}
+
+// FPDFText_ClosePage closes the text page before injecting a fault, so a test
+// can tell a failed close request from a text page that was never closed.
+func (f *faultInjectingPdfium) FPDFText_ClosePage(req *requests.FPDFText_ClosePage) (*responses.FPDFText_ClosePage, error) {
+	resp, err := f.Pdfium.FPDFText_ClosePage(req)
+	if err == nil {
+		delete(f.openTextPages, req.TextPage)
+	}
+	return inject(f, "FPDFText_ClosePage", req, func(*requests.FPDFText_ClosePage) (*responses.FPDFText_ClosePage, error) {
+		return resp, err
+	})
+}
+
 func TestDocumentLinks_ResolvesTargets(t *testing.T) {
 	internalURI := fmt.Sprintf("#page=%d", linkTargetPage+1)
 	tests := []struct {
@@ -229,17 +337,25 @@ func TestDocumentLinks_ResolvesTargets(t *testing.T) {
 		want []PageLink
 	}{
 		{"direct and action destinations", uriBase, linkSourcePage, []PageLink{
-			{Index: 0, TargetPage: linkTargetPage, URI: internalURI},
-			{Index: 1, TargetPage: linkTargetPage, URI: internalURI},
+			{Index: 0, TargetPage: linkTargetPage, URI: internalURI, Rect: Rect{Left: 10, Bottom: 10, Right: 50, Top: 50}},
+			{Index: 1, TargetPage: linkTargetPage, URI: internalURI, Rect: Rect{Left: 60, Bottom: 10, Right: 100, Top: 50}},
 		}},
 		{"page without links", uriBase, linkTargetPage, nil},
 		{"links without in-document destination, catalog base", uriBase, actionLinkPage, actionPageLinks(uriBase)},
 		{"links without in-document destination, no catalog base", "", actionLinkPage, actionPageLinks("")},
+		{"links over page text", uriBase, labelledLinkPage, labelledPageLinks()},
+		// PDFium reports a missing /Rect as an all-zero rectangle, which
+		// covers no text.
+		{"link without rectangle", uriBase, missingRectPage, []PageLink{
+			{Index: 0, TargetPage: linkTargetPage, URI: internalURI},
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			doc, cleanup := openLinkPDF(t, tt.base)
 			defer cleanup()
+			tracker := &faultInjectingPdfium{Pdfium: doc.instance}
+			doc.instance = tracker
 
 			got, err := doc.Links(tt.page)
 			if err != nil {
@@ -247,6 +363,9 @@ func TestDocumentLinks_ResolvesTargets(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Fatalf("Links(%d) =\n%#v\nwant\n%#v", tt.page, got, tt.want)
+			}
+			if len(tracker.openTextPages) != 0 {
+				t.Fatalf("Links(%d) left %d text pages open", tt.page, len(tracker.openTextPages))
 			}
 		})
 	}
@@ -291,12 +410,22 @@ func TestDocumentLinks_RequestFailures(t *testing.T) {
 		{"FPDFAction_GetURIPath", faultError, actionLinkPage, errInjected},
 		{"FPDFAction_GetURIPath", faultNilResponse, actionLinkPage, errMissingResponse},
 		{"FPDFAction_GetURIPath", faultMissingURIPath, actionLinkPage, errMissingURIPath},
+		{"FPDFLink_GetAnnotRect", faultError, labelledLinkPage, errInjected},
+		{"FPDFLink_GetAnnotRect", faultNilResponse, labelledLinkPage, errMissingResponse},
+		{"FPDFLink_GetAnnotRect", faultMissingRect, labelledLinkPage, errMissingRect},
+		{"FPDFText_LoadPage", faultError, labelledLinkPage, errInjected},
+		{"FPDFText_LoadPage", faultNilResponse, labelledLinkPage, errMissingResponse},
+		{"FPDFText_GetBoundedText", faultError, labelledLinkPage, errInjected},
+		{"FPDFText_GetBoundedText", faultNilResponse, labelledLinkPage, errMissingResponse},
+		{"FPDFText_ClosePage", faultError, labelledLinkPage, errInjected},
+		{"FPDFText_ClosePage", faultNilResponse, labelledLinkPage, errMissingResponse},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+"/"+tt.fault.String(), func(t *testing.T) {
 			doc, cleanup := openLinkPDF(t, uriBase)
 			defer cleanup()
-			doc.instance = &faultInjectingPdfium{Pdfium: doc.instance, method: tt.method, fault: tt.fault}
+			f := &faultInjectingPdfium{Pdfium: doc.instance, method: tt.method, fault: tt.fault}
+			doc.instance = f
 
 			links, err := doc.Links(tt.page)
 			if !errors.Is(err, tt.want) {
@@ -308,7 +437,35 @@ func TestDocumentLinks_RequestFailures(t *testing.T) {
 			if !strings.Contains(err.Error(), fmt.Sprintf("page %d", tt.page)) {
 				t.Fatalf("Links(%d) with failing %s error = %q, want page context", tt.page, tt.method, err)
 			}
+			if len(f.openTextPages) != 0 {
+				t.Fatalf("Links(%d) with failing %s left %d text pages open", tt.page, tt.method, len(f.openTextPages))
+			}
 		})
+	}
+}
+
+// TestDocumentLinks_FixtureLinkText reads the link of a MuPDF-written planner
+// page whose rectangle covers only the start of the header word "Sep".
+func TestDocumentLinks_FixtureLinkText(t *testing.T) {
+	data, err := os.ReadFile("testdata/linked_pages.pdf")
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	doc, cleanup, err := OpenDocumentFromBytes(data)
+	if err != nil {
+		t.Fatalf("OpenDocumentFromBytes: %v", err)
+	}
+	defer cleanup()
+
+	got, err := doc.Links(0)
+	if err != nil {
+		t.Fatalf("Links(0) error = %v, want nil", err)
+	}
+	want := []PageLink{
+		{Index: 0, TargetPage: noTargetPage, URI: "#page=2", Rect: Rect{Left: 10, Bottom: 545.2756, Right: 50, Top: 585.2756}, Text: "Se"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Links(0) =\n%#v\nwant\n%#v", got, want)
 	}
 }
 

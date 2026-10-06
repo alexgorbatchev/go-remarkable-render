@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ var (
 	errMissingResponse     = errors.New("pdfium returned no response")
 	errMissingNextStartPos = errors.New("pdfium returned a link without a next start position")
 	errMissingURIPath      = errors.New("pdfium returned no URI for a URI action")
+	errMissingRect         = errors.New("pdfium returned no rectangle for a link")
 
 	poolOnce   sync.Once
 	pdfiumPool pdfium.Pool
@@ -65,6 +67,35 @@ type PageLink struct {
 	// without a /Base, and for any other link, such as a remote go-to,
 	// launch, or named action, or a link whose destination does not resolve.
 	URI string
+
+	// Rect is the link annotation's /Rect, the area that activates the link.
+	// PDFium reports a missing /Rect, or one that is not a four-element
+	// array, as the zero Rect.
+	Rect Rect
+
+	// Text is the page text PDFium reports inside Rect, in the page's text
+	// order, with every run of white space (unicode.IsSpace, including the
+	// "\r\n" PDFium inserts between text lines) replaced by one space and
+	// leading and trailing white space removed. PDFium includes every
+	// character whose box overlaps Rect with a non-zero area, so a character
+	// partly inside Rect counts in full while the rest of its word does not.
+	// Text is empty when Rect covers no text, such as a link drawn over
+	// handwriting or an image.
+	Text string
+}
+
+// Rect is a rectangle in the page's default user space, as written in the
+// PDF: units are points (1/72 inch unless the page sets /UserUnit), y grows
+// upwards, and the page's /MediaBox or /CropBox origin and /Rotate are not
+// applied. On a page whose media box starts at [0 0], (0, 0) is the
+// bottom-left corner. The fields follow the order of a PDF rectangle array,
+// [Left Bottom Right Top], and are normalized so that Left <= Right and
+// Bottom <= Top whichever pair of opposite corners the PDF lists.
+type Rect struct {
+	Left   float32
+	Bottom float32
+	Right  float32
+	Top    float32
 }
 
 // Document wraps an open PDFium document instance.
@@ -88,12 +119,7 @@ func (d *Document) Text(pageIdx int) (string, error) {
 	}
 
 	textResp, err := pdfiumResponse(d.instance.GetPageText(&requests.GetPageText{
-		Page: requests.Page{
-			ByIndex: &requests.PageByIndex{
-				Document: d.handle.Document,
-				Index:    pageIdx,
-			},
-		},
+		Page: d.page(pageIdx),
 	}))
 	if err != nil {
 		return "", fmt.Errorf("extracting text from page %d: %w", pageIdx, err)
@@ -101,25 +127,47 @@ func (d *Document) Text(pageIdx int) (string, error) {
 	return textResp.Text, nil
 }
 
-// Links extracts internal link targets and external hyperlinks from a page.
-// A page without links yields an empty list and a nil error. Any failed
-// PDFium request returns an error and no links.
+// Links extracts internal link targets and external hyperlinks from a page,
+// with each link's rectangle and the page text inside it. A page without links
+// yields an empty list and a nil error. Any failed PDFium request returns an
+// error and no links.
 func (d *Document) Links(pageIdx int) ([]PageLink, error) {
 	if pageIdx < 0 || pageIdx >= d.pages {
 		return nil, fmt.Errorf("%w: page index %d", ErrPageOutOfBounds, pageIdx)
 	}
 
+	links, err := d.enumerateLinks(pageIdx)
+	if err != nil {
+		return nil, err
+	}
+	if len(links) == 0 {
+		return links, nil
+	}
+	if err := d.setLinkTexts(pageIdx, links); err != nil {
+		return nil, err
+	}
+	return links, nil
+}
+
+// page addresses page pageIdx of the document.
+func (d *Document) page(pageIdx int) requests.Page {
+	return requests.Page{
+		ByIndex: &requests.PageByIndex{
+			Document: d.handle.Document,
+			Index:    pageIdx,
+		},
+	}
+}
+
+// enumerateLinks returns the links of a page with their targets and
+// rectangles but without their text.
+func (d *Document) enumerateLinks(pageIdx int) ([]PageLink, error) {
 	var results []PageLink
 	pos := 0
 
 	for {
 		linkResp, err := pdfiumResponse(d.instance.FPDFLink_Enumerate(&requests.FPDFLink_Enumerate{
-			Page: requests.Page{
-				ByIndex: &requests.PageByIndex{
-					Document: d.handle.Document,
-					Index:    pageIdx,
-				},
-			},
+			Page:     d.page(pageIdx),
 			StartPos: pos,
 		}))
 		if err != nil {
@@ -139,13 +187,78 @@ func (d *Document) Links(pageIdx int) ([]PageLink, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolving link %d on page %d: %w", len(results), pageIdx, err)
 		}
+		rect, err := d.linkRect(*linkResp.Link)
+		if err != nil {
+			return nil, fmt.Errorf("reading rectangle of link %d on page %d: %w", len(results), pageIdx, err)
+		}
 
 		results = append(results, PageLink{
 			Index:      len(results),
 			TargetPage: target.page,
 			URI:        target.uri,
+			Rect:       rect,
 		})
 	}
+}
+
+// linkRect returns the normalized rectangle of a link. PDFium reports the
+// /Rect array as written, and ISO 32000-1 section 7.9.5 allows a rectangle to
+// list any two opposite corners.
+func (d *Document) linkRect(link references.FPDF_LINK) (Rect, error) {
+	rectResp, err := pdfiumResponse(d.instance.FPDFLink_GetAnnotRect(&requests.FPDFLink_GetAnnotRect{
+		Link: link,
+	}))
+	if err != nil {
+		return Rect{}, err
+	}
+	// go-pdfium leaves Rect nil when PDFium's FPDFLink_GetAnnotRect returns
+	// false, which it does only for a missing link handle.
+	r := rectResp.Rect
+	if r == nil {
+		return Rect{}, errMissingRect
+	}
+	return Rect{
+		Left:   min(r.Left, r.Right),
+		Bottom: min(r.Bottom, r.Top),
+		Right:  max(r.Left, r.Right),
+		Top:    max(r.Bottom, r.Top),
+	}, nil
+}
+
+// setLinkTexts sets the Text of each link on a page from the page text inside
+// its Rect. The text page it loads is closed on every path; a failure to close
+// it is returned.
+func (d *Document) setLinkTexts(pageIdx int, links []PageLink) (err error) {
+	textPage, err := pdfiumResponse(d.instance.FPDFText_LoadPage(&requests.FPDFText_LoadPage{
+		Page: d.page(pageIdx),
+	}))
+	if err != nil {
+		return fmt.Errorf("loading text of page %d: %w", pageIdx, err)
+	}
+	defer func() {
+		_, closeErr := pdfiumResponse(d.instance.FPDFText_ClosePage(&requests.FPDFText_ClosePage{
+			TextPage: textPage.TextPage,
+		}))
+		if closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing text of page %d: %w", pageIdx, closeErr))
+		}
+	}()
+
+	for i := range links {
+		r := links[i].Rect
+		textResp, textErr := pdfiumResponse(d.instance.FPDFText_GetBoundedText(&requests.FPDFText_GetBoundedText{
+			TextPage: textPage.TextPage,
+			Left:     float64(r.Left),
+			Top:      float64(r.Top),
+			Right:    float64(r.Right),
+			Bottom:   float64(r.Bottom),
+		}))
+		if textErr != nil {
+			return fmt.Errorf("reading text of link %d on page %d: %w", i, pageIdx, textErr)
+		}
+		links[i].Text = strings.Join(strings.Fields(textResp.Text), " ")
+	}
+	return nil
 }
 
 // linkTarget is where a link leads: an in-document page with its "#page=N"
