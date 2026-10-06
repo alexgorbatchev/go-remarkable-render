@@ -53,11 +53,17 @@ type PageLink struct {
 	TargetPage int
 
 	// URI is "#page=N" (TargetPage+1) for a link to a page of this document.
-	// For a URI action it is the action's URI as PDFium reports it: the raw
-	// bytes of the /URI string, not validated as UTF-8, prefixed by the
-	// document catalog's /URI /Base when the URI has no scheme. It is empty
-	// for any other link, such as a remote go-to, launch, or named action, or
-	// a link whose destination does not resolve.
+	// For a URI action it is the URI PDFium reports: the raw bytes of the
+	// /URI string, not validated as UTF-8. When the document catalog has a
+	// /URI /Base and the /URI string contains no ':' or starts with one,
+	// PDFium concatenates the base in front of it. That is plain string
+	// concatenation, not RFC 3986 reference resolution, so it can produce a
+	// malformed URL (base "https://a/b.html" and "c.html" yield
+	// "https://a/b.htmlc.html"), and a URI with ':' after its first byte is
+	// never prefixed. Without a /Base, a relative URI is returned as written.
+	// URI is empty for a URI action whose /URI string is empty in a document
+	// without a /Base, and for any other link, such as a remote go-to,
+	// launch, or named action, or a link whose destination does not resolve.
 	URI string
 }
 

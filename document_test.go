@@ -19,35 +19,42 @@ const (
 	actionLinkPage = 2
 )
 
-// URIs of the action links on actionLinkPage. The absolute URI carries the
-// UTF-8 bytes of "é" as octal escapes in the PDF string. The relative URI is
-// resolved against the catalog's /URI /Base, as ISO 32000-1 section 12.6.4.7
-// requires.
+// URIs of the action links on actionLinkPage, as the PDF strings encode them
+// and as Links must report them. The absolute URI carries the UTF-8 bytes of
+// "é" as octal escapes; the invalid-UTF-8 URI carries the byte 0xFF. PDFium
+// concatenates the catalog's /URI /Base in front of a URI that contains no
+// ':' or starts with one; it does not resolve the reference per RFC 3986.
+// uriBase deliberately does not end in '/' so the concatenation is visible.
 const (
-	absoluteURI     = "https://example.com/path?q=1&r=café#frag"
-	relativeURI     = "guide.html"
-	uriBase         = "https://example.com/docs/"
-	resolvedBaseURI = uriBase + relativeURI
+	absoluteURI       = "https://example.com/path?q=1&r=café#frag"
+	relativeURI       = "guide.html"
+	colonRelativeURI  = "guide.html?t=10:30"
+	leadingColonURI   = ":note"
+	invalidUTF8URI    = "https://example.com/\xff"
+	uriBase           = "https://example.com/docs/index.html"
+	absoluteURIPDF    = "https://example.com/path?q=1&r=caf\\303\\251#frag"
+	invalidUTF8URIPDF = "https://example.com/\\377"
 )
 
-// buildLinkPDF builds a three-page PDF. Page 0 carries two link annotations to
-// page 1: one with a direct /Dest and one with a /GoTo action. Page 1 has no
-// annotations. Page 2 carries links without an in-document destination: an
-// absolute /URI action, a relative /URI action, a /GoToR action into another
-// file, a /Launch action, a /Named action, a link with neither a destination
-// nor an action, a /URI action with an empty URI, which has no scheme and so
-// resolves to the base URI, and a /Dest naming the catalog, which is not a
-// page.
-func buildLinkPDF() []byte {
+// buildLinkPDF builds a three-page PDF whose catalog carries /URI /Base base,
+// or no /URI dictionary when base is empty. Page 0 carries two link
+// annotations to page 1: one with a direct /Dest and one with a /GoTo action.
+// Page 1 has no annotations. Page 2 carries the links actionPageLinks
+// describes, none of which has an in-document destination.
+func buildLinkPDF(base string) []byte {
+	catalog := "<< /Type /Catalog /Pages 2 0 R >>"
+	if base != "" {
+		catalog = "<< /Type /Catalog /Pages 2 0 R /URI << /Base (" + base + ") >> >>"
+	}
 	objects := []string{
-		"<< /Type /Catalog /Pages 2 0 R /URI << /Base (" + uriBase + ") >> >>",
+		catalog,
 		"<< /Type /Pages /Kids [3 0 R 4 0 R 7 0 R] /Count 3 >>",
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [5 0 R 6 0 R] >>",
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
 		"<< /Type /Annot /Subtype /Link /Rect [10 10 50 50] /Dest [4 0 R /Fit] >>",
 		"<< /Type /Annot /Subtype /Link /Rect [60 10 100 50] /A << /S /GoTo /D [4 0 R /Fit] >> >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R] >>",
-		"<< /Type /Annot /Subtype /Link /Rect [10 10 50 50] /A << /S /URI /URI (https://example.com/path?q=1&r=caf\\303\\251#frag) >> >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R 18 0 R] >>",
+		"<< /Type /Annot /Subtype /Link /Rect [10 10 50 50] /A << /S /URI /URI (" + absoluteURIPDF + ") >> >>",
 		"<< /Type /Annot /Subtype /Link /Rect [60 10 100 50] /A << /S /URI /URI (" + relativeURI + ") >> >>",
 		"<< /Type /Annot /Subtype /Link /Rect [110 10 150 50] /A << /S /GoToR /F (other.pdf) /D [0 /Fit] >> >>",
 		"<< /Type /Annot /Subtype /Link /Rect [10 60 50 100] /A << /S /Launch /F (notes.txt) >> >>",
@@ -55,6 +62,9 @@ func buildLinkPDF() []byte {
 		"<< /Type /Annot /Subtype /Link /Rect [110 60 150 100] >>",
 		"<< /Type /Annot /Subtype /Link /Rect [10 110 50 150] /A << /S /URI /URI () >> >>",
 		"<< /Type /Annot /Subtype /Link /Rect [60 110 100 150] /Dest [1 0 R /Fit] >>",
+		"<< /Type /Annot /Subtype /Link /Rect [110 110 150 150] /A << /S /URI /URI (" + colonRelativeURI + ") >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [10 160 50 200] /A << /S /URI /URI (" + leadingColonURI + ") >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [60 160 100 200] /A << /S /URI /URI (" + invalidUTF8URIPDF + ") >> >>",
 	}
 
 	var buf bytes.Buffer
@@ -74,9 +84,29 @@ func buildLinkPDF() []byte {
 	return buf.Bytes()
 }
 
-func openLinkPDF(t *testing.T) (*Document, func()) {
+// actionPageLinks returns the links Links must report for actionLinkPage when
+// PDFium concatenates basePrefix (the catalog's /URI /Base, or "" without one)
+// in front of the URIs it applies to: those without ':' and those starting
+// with ':'.
+func actionPageLinks(basePrefix string) []PageLink {
+	return []PageLink{
+		{Index: 0, TargetPage: noTargetPage, URI: absoluteURI},
+		{Index: 1, TargetPage: noTargetPage, URI: basePrefix + relativeURI},
+		{Index: 2, TargetPage: noTargetPage, URI: ""},
+		{Index: 3, TargetPage: noTargetPage, URI: ""},
+		{Index: 4, TargetPage: noTargetPage, URI: ""},
+		{Index: 5, TargetPage: noTargetPage, URI: ""},
+		{Index: 6, TargetPage: noTargetPage, URI: basePrefix},
+		{Index: 7, TargetPage: noTargetPage, URI: ""},
+		{Index: 8, TargetPage: noTargetPage, URI: colonRelativeURI},
+		{Index: 9, TargetPage: noTargetPage, URI: basePrefix + leadingColonURI},
+		{Index: 10, TargetPage: noTargetPage, URI: invalidUTF8URI},
+	}
+}
+
+func openLinkPDF(t *testing.T, base string) (*Document, func()) {
 	t.Helper()
-	doc, cleanup, err := OpenDocumentFromBytes(buildLinkPDF())
+	doc, cleanup, err := OpenDocumentFromBytes(buildLinkPDF(base))
 	if err != nil {
 		t.Fatalf("OpenDocumentFromBytes: %v", err)
 	}
@@ -191,46 +221,39 @@ func (f *faultInjectingPdfium) FPDFAction_GetURIPath(req *requests.FPDFAction_Ge
 }
 
 func TestDocumentLinks_ResolvesTargets(t *testing.T) {
-	doc, cleanup := openLinkPDF(t)
-	defer cleanup()
-
 	internalURI := fmt.Sprintf("#page=%d", linkTargetPage+1)
 	tests := []struct {
 		name string
+		base string
 		page int
 		want []PageLink
 	}{
-		{"direct and action destinations", linkSourcePage, []PageLink{
+		{"direct and action destinations", uriBase, linkSourcePage, []PageLink{
 			{Index: 0, TargetPage: linkTargetPage, URI: internalURI},
 			{Index: 1, TargetPage: linkTargetPage, URI: internalURI},
 		}},
-		{"page without links", linkTargetPage, nil},
-		{"links without in-document destination", actionLinkPage, []PageLink{
-			{Index: 0, TargetPage: noTargetPage, URI: absoluteURI},
-			{Index: 1, TargetPage: noTargetPage, URI: resolvedBaseURI},
-			{Index: 2, TargetPage: noTargetPage, URI: ""},
-			{Index: 3, TargetPage: noTargetPage, URI: ""},
-			{Index: 4, TargetPage: noTargetPage, URI: ""},
-			{Index: 5, TargetPage: noTargetPage, URI: ""},
-			{Index: 6, TargetPage: noTargetPage, URI: uriBase},
-			{Index: 7, TargetPage: noTargetPage, URI: ""},
-		}},
+		{"page without links", uriBase, linkTargetPage, nil},
+		{"links without in-document destination, catalog base", uriBase, actionLinkPage, actionPageLinks(uriBase)},
+		{"links without in-document destination, no catalog base", "", actionLinkPage, actionPageLinks("")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			doc, cleanup := openLinkPDF(t, tt.base)
+			defer cleanup()
+
 			got, err := doc.Links(tt.page)
 			if err != nil {
 				t.Fatalf("Links(%d) error = %v, want nil", tt.page, err)
 			}
 			if !slices.Equal(got, tt.want) {
-				t.Fatalf("Links(%d) = %+v, want %+v", tt.page, got, tt.want)
+				t.Fatalf("Links(%d) =\n%#v\nwant\n%#v", tt.page, got, tt.want)
 			}
 		})
 	}
 }
 
 func TestDocumentLinks_ClosedDocumentFails(t *testing.T) {
-	doc, cleanup := openLinkPDF(t)
+	doc, cleanup := openLinkPDF(t, uriBase)
 	cleanup()
 
 	links, err := doc.Links(linkSourcePage)
@@ -271,7 +294,7 @@ func TestDocumentLinks_RequestFailures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+"/"+tt.fault.String(), func(t *testing.T) {
-			doc, cleanup := openLinkPDF(t)
+			doc, cleanup := openLinkPDF(t, uriBase)
 			defer cleanup()
 			doc.instance = &faultInjectingPdfium{Pdfium: doc.instance, method: tt.method, fault: tt.fault}
 
@@ -316,7 +339,7 @@ func TestOpenDocument_RequestFailures(t *testing.T) {
 			}
 			f := &faultInjectingPdfium{Pdfium: instance, method: tt.method, fault: tt.fault}
 
-			doc, cleanup, err := openDocument(f, buildLinkPDF())
+			doc, cleanup, err := openDocument(f, buildLinkPDF(uriBase))
 			if err == nil {
 				cleanup()
 				t.Fatalf("openDocument with failing %s = %d pages, nil error; want error wrapping %v", tt.method, doc.NumPage(), tt.want)
@@ -348,7 +371,7 @@ func TestDocumentText_RequestFailures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.fault.String(), func(t *testing.T) {
-			doc, cleanup := openLinkPDF(t)
+			doc, cleanup := openLinkPDF(t, uriBase)
 			defer cleanup()
 			doc.instance = &faultInjectingPdfium{Pdfium: doc.instance, method: "GetPageText", fault: tt.fault}
 
