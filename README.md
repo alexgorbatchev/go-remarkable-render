@@ -72,7 +72,7 @@ func main() {
 | `IndexPlannerDates` | `(pdfDocOrPath any, year int) (map[string]map[string]int, error)` | Indexes annual planner PDF dates to page indices |
 | `OpenDocumentFromBytes` | `(data []byte) (*Document, func(), error)` | Opens a PDF for reuse across calls; call the returned function to release it. Returns an error, and releases everything it acquired, when the PDF cannot be opened or its page count cannot be read |
 | `Document.Text` | `(pageIdx int) (string, error)` | Returns the plain text of a 0-based page, or `""` when the page has no text. Returns `ErrPageOutOfBounds` for an invalid index and an error when a PDFium request fails |
-| `Document.Links` | `(pageIdx int) ([]PageLink, error)` | Returns the link annotations of a 0-based page in order. `TargetPage` is the 0-based destination page, or `-1` for a link without an in-document destination. A page without links returns an empty list; a failed PDFium request returns an error and no links |
+| `Document.Links` | `(pageIdx int) ([]PageLink, error)` | Returns the link annotations of a 0-based page in order. A link to a page of the document has its 0-based `TargetPage` and the URI `#page=N` (`TargetPage`+1). An external URI link has `TargetPage` `-1` and the action's URI: the raw bytes of its `/URI` string, not validated as UTF-8, prefixed by the catalog's `/URI /Base` when the URI has no scheme. Any other link (remote go-to, launch, named, or unresolvable destination) has `TargetPage` `-1` and an empty URI. A page without links returns an empty list; a failed PDFium request returns an error and no links |
 | `DefaultDPI` | `const int = 200` | Standard default rendering resolution in dots per inch |
 
 # Configuration

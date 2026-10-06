@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,23 +16,45 @@ import (
 const (
 	linkSourcePage = 0
 	linkTargetPage = 1
-	uriLinkPage    = 2
+	actionLinkPage = 2
+)
+
+// URIs of the action links on actionLinkPage. The absolute URI carries the
+// UTF-8 bytes of "é" as octal escapes in the PDF string. The relative URI is
+// resolved against the catalog's /URI /Base, as ISO 32000-1 section 12.6.4.7
+// requires.
+const (
+	absoluteURI     = "https://example.com/path?q=1&r=café#frag"
+	relativeURI     = "guide.html"
+	uriBase         = "https://example.com/docs/"
+	resolvedBaseURI = uriBase + relativeURI
 )
 
 // buildLinkPDF builds a three-page PDF. Page 0 carries two link annotations to
 // page 1: one with a direct /Dest and one with a /GoTo action. Page 1 has no
-// annotations. Page 2 carries a /URI action link, which has no destination,
-// so resolving it reaches FPDFLink_GetAction and FPDFAction_GetDest.
+// annotations. Page 2 carries links without an in-document destination: an
+// absolute /URI action, a relative /URI action, a /GoToR action into another
+// file, a /Launch action, a /Named action, a link with neither a destination
+// nor an action, a /URI action with an empty URI, which has no scheme and so
+// resolves to the base URI, and a /Dest naming the catalog, which is not a
+// page.
 func buildLinkPDF() []byte {
 	objects := []string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Catalog /Pages 2 0 R /URI << /Base (" + uriBase + ") >> >>",
 		"<< /Type /Pages /Kids [3 0 R 4 0 R 7 0 R] /Count 3 >>",
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [5 0 R 6 0 R] >>",
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
 		"<< /Type /Annot /Subtype /Link /Rect [10 10 50 50] /Dest [4 0 R /Fit] >>",
 		"<< /Type /Annot /Subtype /Link /Rect [60 10 100 50] /A << /S /GoTo /D [4 0 R /Fit] >> >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [8 0 R] >>",
-		"<< /Type /Annot /Subtype /Link /Rect [10 10 50 50] /A << /S /URI /URI (https://example.com/) >> >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R] >>",
+		"<< /Type /Annot /Subtype /Link /Rect [10 10 50 50] /A << /S /URI /URI (https://example.com/path?q=1&r=caf\\303\\251#frag) >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [60 10 100 50] /A << /S /URI /URI (" + relativeURI + ") >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [110 10 150 50] /A << /S /GoToR /F (other.pdf) /D [0 /Fit] >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [10 60 50 100] /A << /S /Launch /F (notes.txt) >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [60 60 100 100] /A << /S /Named /N /NextPage >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [110 60 150 100] >>",
+		"<< /Type /Annot /Subtype /Link /Rect [10 110 50 150] /A << /S /URI /URI () >> >>",
+		"<< /Type /Annot /Subtype /Link /Rect [60 110 100 150] /Dest [1 0 R /Fit] >>",
 	}
 
 	var buf bytes.Buffer
@@ -68,6 +91,7 @@ const (
 	faultError fault = iota + 1
 	faultNilResponse
 	faultMissingNextStartPos
+	faultMissingURIPath
 )
 
 func (f fault) String() string {
@@ -78,6 +102,8 @@ func (f fault) String() string {
 		return "nil-response"
 	case faultMissingNextStartPos:
 		return "missing-next-start-pos"
+	case faultMissingURIPath:
+		return "missing-uri-path"
 	}
 	return fmt.Sprintf("fault(%d)", int(f))
 }
@@ -152,20 +178,43 @@ func (f *faultInjectingPdfium) FPDFAction_GetDest(req *requests.FPDFAction_GetDe
 	return inject(f, "FPDFAction_GetDest", req, f.Pdfium.FPDFAction_GetDest)
 }
 
+func (f *faultInjectingPdfium) FPDFAction_GetType(req *requests.FPDFAction_GetType) (*responses.FPDFAction_GetType, error) {
+	return inject(f, "FPDFAction_GetType", req, f.Pdfium.FPDFAction_GetType)
+}
+
+func (f *faultInjectingPdfium) FPDFAction_GetURIPath(req *requests.FPDFAction_GetURIPath) (*responses.FPDFAction_GetURIPath, error) {
+	resp, err := inject(f, "FPDFAction_GetURIPath", req, f.Pdfium.FPDFAction_GetURIPath)
+	if f.method == "FPDFAction_GetURIPath" && f.fault == faultMissingURIPath && resp != nil {
+		resp.URIPath = nil
+	}
+	return resp, err
+}
+
 func TestDocumentLinks_ResolvesTargets(t *testing.T) {
 	doc, cleanup := openLinkPDF(t)
 	defer cleanup()
 
-	// The URI of a link without an in-document target is not asserted: it is
-	// not a page anchor and is defined separately from target resolution.
+	internalURI := fmt.Sprintf("#page=%d", linkTargetPage+1)
 	tests := []struct {
-		name        string
-		page        int
-		wantTargets []int
+		name string
+		page int
+		want []PageLink
 	}{
-		{"direct and action destinations", linkSourcePage, []int{linkTargetPage, linkTargetPage}},
+		{"direct and action destinations", linkSourcePage, []PageLink{
+			{Index: 0, TargetPage: linkTargetPage, URI: internalURI},
+			{Index: 1, TargetPage: linkTargetPage, URI: internalURI},
+		}},
 		{"page without links", linkTargetPage, nil},
-		{"uri action without destination", uriLinkPage, []int{noTargetPage}},
+		{"links without in-document destination", actionLinkPage, []PageLink{
+			{Index: 0, TargetPage: noTargetPage, URI: absoluteURI},
+			{Index: 1, TargetPage: noTargetPage, URI: resolvedBaseURI},
+			{Index: 2, TargetPage: noTargetPage, URI: ""},
+			{Index: 3, TargetPage: noTargetPage, URI: ""},
+			{Index: 4, TargetPage: noTargetPage, URI: ""},
+			{Index: 5, TargetPage: noTargetPage, URI: ""},
+			{Index: 6, TargetPage: noTargetPage, URI: uriBase},
+			{Index: 7, TargetPage: noTargetPage, URI: ""},
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -173,17 +222,8 @@ func TestDocumentLinks_ResolvesTargets(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Links(%d) error = %v, want nil", tt.page, err)
 			}
-			if len(got) != len(tt.wantTargets) {
-				t.Fatalf("Links(%d) = %+v, want %d links", tt.page, got, len(tt.wantTargets))
-			}
-			for i, target := range tt.wantTargets {
-				link := got[i]
-				if link.Index != i || link.TargetPage != target {
-					t.Fatalf("Links(%d)[%d] = %+v, want Index %d TargetPage %d", tt.page, i, link, i, target)
-				}
-				if wantURI := fmt.Sprintf("#page=%d", target+1); target != noTargetPage && link.URI != wantURI {
-					t.Fatalf("Links(%d)[%d].URI = %q, want %q", tt.page, i, link.URI, wantURI)
-				}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("Links(%d) = %+v, want %+v", tt.page, got, tt.want)
 			}
 		})
 	}
@@ -219,10 +259,15 @@ func TestDocumentLinks_RequestFailures(t *testing.T) {
 		{"FPDFLink_GetDest", faultNilResponse, linkSourcePage, errMissingResponse},
 		{"FPDFDest_GetDestPageIndex", faultError, linkSourcePage, errInjected},
 		{"FPDFDest_GetDestPageIndex", faultNilResponse, linkSourcePage, errMissingResponse},
-		{"FPDFLink_GetAction", faultError, uriLinkPage, errInjected},
-		{"FPDFLink_GetAction", faultNilResponse, uriLinkPage, errMissingResponse},
-		{"FPDFAction_GetDest", faultError, uriLinkPage, errInjected},
-		{"FPDFAction_GetDest", faultNilResponse, uriLinkPage, errMissingResponse},
+		{"FPDFLink_GetAction", faultError, actionLinkPage, errInjected},
+		{"FPDFLink_GetAction", faultNilResponse, actionLinkPage, errMissingResponse},
+		{"FPDFAction_GetType", faultError, actionLinkPage, errInjected},
+		{"FPDFAction_GetType", faultNilResponse, actionLinkPage, errMissingResponse},
+		{"FPDFAction_GetDest", faultError, linkSourcePage, errInjected},
+		{"FPDFAction_GetDest", faultNilResponse, linkSourcePage, errMissingResponse},
+		{"FPDFAction_GetURIPath", faultError, actionLinkPage, errInjected},
+		{"FPDFAction_GetURIPath", faultNilResponse, actionLinkPage, errMissingResponse},
+		{"FPDFAction_GetURIPath", faultMissingURIPath, actionLinkPage, errMissingURIPath},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+"/"+tt.fault.String(), func(t *testing.T) {
