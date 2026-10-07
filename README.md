@@ -25,7 +25,7 @@
 
 # Prerequisites
 
-- [Go](https://go.dev/) 1.26 or newer.
+- [Go](https://go.dev/) 1.26.2 or newer, the minimum Go version declared by the `go` line in `go.mod`.
 
 # Installation
 

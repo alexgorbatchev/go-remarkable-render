@@ -35,7 +35,8 @@ Any other type, `nil`, or a nil `*Document` must return `ErrInvalidDocument`.
 
 ### 2. Exact Pixel Alignment & Compositing
 - When rasterizing stroke SVGs with `resvg-go`, the dimensions passed to `renderer.RenderWithSize(svg, widthPx, heightPx)` MUST match the exact pixel bounds of the rasterized PDF background (`bgImg.Bounds().Dx()`, `bgImg.Bounds().Dy()`).
-- Alpha blending is performed using `image/draw.Draw(bgImg, bounds, strokeImg, image.Point{}, draw.Over)` to composite transparent vector ink on top of background stationery.
+- Composite into a new image, never into `bgImg`. Copy the background into `finalImg := image.NewRGBA(bgBounds)` with `draw.Draw(finalImg, bgBounds, bgImg, bgBounds.Min, draw.Src)`, then alpha-blend the transparent vector ink over it with `draw.Draw(finalImg, bgBounds, strokeImg, bgBounds.Min, draw.Over)`, and encode `finalImg`.
+- `bgImg` is a write-through view of the PDFium bitmap in the instance's WebAssembly memory (rule 5), so drawing onto it writes into PDFium's memory. The `draw.Src` copy is the last read of `bgImg` on the stroke path, which is what lets the deferred `Cleanup()` run after the composite is encoded without corrupting it.
 
 ### 3. Date Indexing Semantics
 - Daily planner pages have navigation links pairing each date's views:
