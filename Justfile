@@ -3,23 +3,25 @@ set dotenv-load := false
 default:
     @just --list
 
-# Run unit tests
+# Run unit tests with the race detector
 test:
-    go test -v ./...
+    go test -race -v ./...
 
 # Format Go source code
 fmt:
     go fmt ./...
 
-# Run static analysis and vet
+# Check module hygiene, then run vet and golangci-lint
 lint:
+    go mod tidy -diff
     go vet ./...
+    golangci-lint run ./...
 
 # Alias for lint
 vet: lint
 
-# Run checks
-check: test
+# Run lint and the test suite
+check: lint test
 
 # Regenerate E2E golden reference render with Python via PEP 723
 generate-golden:
