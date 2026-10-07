@@ -26,9 +26,9 @@ func buildMinimalPDF(pages ...[]string) []byte {
 	var kids strings.Builder
 	for i := 0; i < numPages; i++ {
 		pageObjID := 4 + 2*i
-		kids.WriteString(fmt.Sprintf("%d 0 R ", pageObjID))
+		fmt.Fprintf(&kids, "%d 0 R ", pageObjID)
 	}
-	buf.WriteString(fmt.Sprintf("2 0 obj\n<< /Type /Pages /Kids [%s] /Count %d >>\nendobj\n", strings.TrimSpace(kids.String()), numPages))
+	fmt.Fprintf(&buf, "2 0 obj\n<< /Type /Pages /Kids [%s] /Count %d >>\nendobj\n", strings.TrimSpace(kids.String()), numPages)
 
 	// 3 0 obj Font
 	offsets = append(offsets, buf.Len())
@@ -41,7 +41,7 @@ func buildMinimalPDF(pages ...[]string) []byte {
 
 		// Page obj
 		offsets = append(offsets, buf.Len())
-		buf.WriteString(fmt.Sprintf("%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 447.874 595.275] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>\nendobj\n", pageObjID, contentObjID))
+		fmt.Fprintf(&buf, "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 447.874 595.275] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>\nendobj\n", pageObjID, contentObjID)
 
 		// Content stream
 		var streamBuf bytes.Buffer
@@ -50,21 +50,21 @@ func buildMinimalPDF(pages ...[]string) []byte {
 			escaped := strings.ReplaceAll(line, "\\", "\\\\")
 			escaped = strings.ReplaceAll(escaped, "(", "\\(")
 			escaped = strings.ReplaceAll(escaped, ")", "\\)")
-			streamBuf.WriteString(fmt.Sprintf("(%s) Tj\nT*\n", escaped))
+			fmt.Fprintf(&streamBuf, "(%s) Tj\nT*\n", escaped)
 		}
 		streamBuf.WriteString("ET\n")
 
 		offsets = append(offsets, buf.Len())
-		buf.WriteString(fmt.Sprintf("%d 0 obj\n<< /Length %d >>\nstream\n%sendstream\nendobj\n", contentObjID, streamBuf.Len(), streamBuf.String()))
+		fmt.Fprintf(&buf, "%d 0 obj\n<< /Length %d >>\nstream\n%sendstream\nendobj\n", contentObjID, streamBuf.Len(), streamBuf.String())
 	}
 
 	xrefOffset := buf.Len()
 	totalObjs := 4 + 2*numPages
-	buf.WriteString(fmt.Sprintf("xref\n0 %d\n0000000000 65535 f \n", totalObjs))
+	fmt.Fprintf(&buf, "xref\n0 %d\n0000000000 65535 f \n", totalObjs)
 	for i := 1; i < totalObjs; i++ {
-		buf.WriteString(fmt.Sprintf("%010d 00000 n \n", offsets[i]))
+		fmt.Fprintf(&buf, "%010d 00000 n \n", offsets[i])
 	}
-	buf.WriteString(fmt.Sprintf("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", totalObjs, xrefOffset))
+	fmt.Fprintf(&buf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", totalObjs, xrefOffset)
 
 	return buf.Bytes()
 }
