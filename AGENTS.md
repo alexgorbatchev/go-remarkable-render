@@ -42,7 +42,7 @@ Any other type, `nil`, or a nil `*Document` must return `ErrInvalidDocument`.
   - Header token `"Notes"` identifies the **Day** view (`kind = "day"`), linking to its paired notes page.
   - Header token `"Day"` identifies the **Notes** view (`kind = "notes"`), linking back to its paired day page.
 - Date string keys are formatted as ISO 8601 `YYYY-MM-DD`.
-- Read page text through `Document.Text`. A failed text request on any page, including a nil PDFium response or a released `*Document`, returns that error with the 0-based page index and a nil map; never skip the page or return a partial index. Only a page whose text was read and carries no date header is skipped.
+- Read page text through `Document.Text`. A failed text request on any page, including a nil PDFium response or a released `*Document`, returns that error with the 0-based page index and a nil map; never skip the page or return a partial index. A page whose text was read is skipped only when it lacks a matching `Month Day Weekday` header with `Notes` or `Day`.
 
 ### 4. Empty Stroke Handling
 - If `rmBytes` is `nil` or empty (`len(rmBytes) == 0`), `RenderPlannerPage` skips stroke parsing and rasterization, returning the encoded PNG of the background PDF page directly.
