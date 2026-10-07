@@ -113,7 +113,12 @@ func buildLinkPDF(base string) []byte {
 		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(astralToUnicodeCMap), astralToUnicodeCMap),
 		"<< /Type /Annot /Subtype /Link /Rect [95 10 150 30] /Dest [4 0 R /Fit] >>",
 	}
+	return encodePDF(objects)
+}
 
+// encodePDF serializes objects as a PDF 1.4 file whose object i+1 is
+// objects[i] and whose trailer names object 1 as the catalog.
+func encodePDF(objects []string) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("%PDF-1.4\n")
 	offsets := make([]int, len(objects))
@@ -215,8 +220,10 @@ func (f fault) String() string {
 // loaded and not yet closed.
 type faultInjectingPdfium struct {
 	pdfium.Pdfium
-	method         string
-	fault          fault
+	method string
+	fault  fault
+	// faultPage, when set, limits a GetPageText fault to that 0-based page.
+	faultPage      *int
 	documentClosed bool
 	instanceClosed bool
 	openTextPages  map[references.FPDF_TEXTPAGE]bool
@@ -254,6 +261,9 @@ func inject[Req, Resp any](f *faultInjectingPdfium, method string, req Req, call
 }
 
 func (f *faultInjectingPdfium) GetPageText(req *requests.GetPageText) (*responses.GetPageText, error) {
+	if f.faultPage != nil && req.Page.ByIndex.Index != *f.faultPage {
+		return f.Pdfium.GetPageText(req)
+	}
 	return inject(f, "GetPageText", req, f.Pdfium.GetPageText)
 }
 

@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/klippa-app/go-pdfium/requests"
 )
 
 var months = map[string]int{
@@ -26,6 +24,11 @@ var weekdays = map[string]bool{
 // For each matching date:
 // - A page containing "Notes" in its header represents the "day" view (pointing to its notes companion).
 // - A page containing "Day" in its header represents the "notes" view (pointing back to its day companion).
+//
+// A page whose text carries no such header is skipped. A failed PDFium text
+// request for any page, including one that returns no response or one made on
+// a released *Document, returns an error naming the 0-based page index and no
+// index.
 func IndexPlannerDates(pdfDocOrPath any, year int) (map[string]map[string]int, error) {
 	if year <= 0 {
 		return nil, ErrInvalidYear
@@ -41,18 +44,10 @@ func IndexPlannerDates(pdfDocOrPath any, year int) (map[string]map[string]int, e
 	numPages := doc.NumPage()
 
 	for idx := 0; idx < numPages; idx++ {
-		textResp, err := doc.instance.GetPageText(&requests.GetPageText{
-			Page: requests.Page{
-				ByIndex: &requests.PageByIndex{
-					Document: doc.handle.Document,
-					Index:    idx,
-				},
-			},
-		})
-		if err != nil || textResp == nil {
-			continue
+		text, err := doc.Text(idx)
+		if err != nil {
+			return nil, err
 		}
-		text := textResp.Text
 
 		tokens := strings.Fields(text)
 		if len(tokens) < 3 {
