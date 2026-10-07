@@ -47,6 +47,11 @@ Any other type, `nil`, or a nil `*Document` must return `ErrInvalidDocument`.
 ### 4. Empty Stroke Handling
 - If `rmBytes` is `nil` or empty (`len(rmBytes) == 0`), `RenderPlannerPage` skips stroke parsing and rasterization, returning the encoded PNG of the background PDF page directly.
 
+### 5. PDFium Render Response Lifetime
+- A go-pdfium render response (`RenderPageInDPI` and the other responses with a `CleanupFunc`) holds a bitmap in the PDFium instance's WebAssembly memory, and its `RenderedImage` is a view of that memory, not a copy. Only `Cleanup()` destroys the bitmap; closing the instance frees it only because the pool does not reuse workers.
+- Call `Cleanup()` exactly once for every successful render, on every return path, after the last read of the image (the PNG encode or the `draw.Draw` onto the composite). `defer renderResp.Cleanup()` right after the error check does both. A missed cleanup leaks one full-page bitmap per render in a reused `*Document` until PDFium can no longer allocate one; a cleanup before the last read corrupts the image.
+- Check render responses with `pdfiumResponse`, like every other PDFium request, so a nil response is an error rather than a nil dereference.
+
 ---
 
 ## Testing & Verification Standards
@@ -75,3 +80,5 @@ CI runs the same checks: the `verify` job runs tidy, build, vet, and the race-en
 - `TestRenderPlannerPage_SampleStrokes`: Constructs v6 `.rm` streams with ballpoint and Paper Pro highlighter strokes, verifying composited PNG pixel differences against background-only renders.
 - `TestRenderPlannerPage_DocumentInputs`: Tests `*Document`, file path, and `io.Reader` inputs.
 - `TestRenderPlannerPage_Errors`: Tests invalid page bounds, malformed `.rm` bytes, corrupt PDFs, and unsupported types.
+- `TestRenderPlannerPage_ReusedDocumentReleasesBitmaps`: Renders one page repeatedly through a single `*Document` on a PDFium instance whose memory is capped with wazero's `WithMemoryLimitPages`, so any leaked bitmap makes a later render fail to allocate.
+- `TestRenderPlannerPage_ReleasesRenderedPage`: Wraps the instance in `faultInjectingPdfium` to assert that each rendered page is released exactly once on success, malformed-stroke, injected-error, and nil-response paths, and that the image is not read after release (the wrapper clears its pixels on release, and the result must stay opaque).

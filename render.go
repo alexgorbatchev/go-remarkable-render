@@ -42,7 +42,7 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	}
 
 	// 1. Render background PDF page to image at target DPI
-	renderResp, err := doc.instance.RenderPageInDPI(&requests.RenderPageInDPI{
+	renderResp, err := pdfiumResponse(doc.instance.RenderPageInDPI(&requests.RenderPageInDPI{
 		Page: requests.Page{
 			ByIndex: &requests.PageByIndex{
 				Document: doc.handle.Document,
@@ -50,10 +50,15 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 			},
 		},
 		DPI: dpi,
-	})
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("failed to render PDF page %d at %d DPI: %w", pageIdx, dpi, err)
 	}
+	// In WebAssembly the image is a view of the bitmap in the instance's
+	// memory, and only Cleanup destroys that bitmap. Deferring it here
+	// releases the bitmap on every return path, after the last read of bgImg,
+	// so a reused *Document does not accumulate one bitmap per render.
+	defer renderResp.Cleanup()
 	bgImg := renderResp.Result.RenderedImage
 
 	// 2. If no rm stroke bytes are provided, encode and return the background PDF page directly

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"image"
 	"os"
 	"slices"
 	"strings"
@@ -216,8 +217,9 @@ func (f fault) String() string {
 
 // faultInjectingPdfium forwards every call to a real PDFium instance except
 // the one named method, which fails with the configured fault. It records
-// whether the document and the instance were closed, and which text pages are
-// loaded and not yet closed.
+// whether the document and the instance were closed, which text pages are
+// loaded and not yet closed, and how many rendered pages were returned and
+// released.
 type faultInjectingPdfium struct {
 	pdfium.Pdfium
 	method string
@@ -227,6 +229,8 @@ type faultInjectingPdfium struct {
 	documentClosed bool
 	instanceClosed bool
 	openTextPages  map[references.FPDF_TEXTPAGE]bool
+	renders        int
+	renderCleanups int
 }
 
 func (f *faultInjectingPdfium) OpenDocument(req *requests.OpenDocument) (*responses.OpenDocument, error) {
@@ -265,6 +269,33 @@ func (f *faultInjectingPdfium) GetPageText(req *requests.GetPageText) (*response
 		return f.Pdfium.GetPageText(req)
 	}
 	return inject(f, "GetPageText", req, f.Pdfium.GetPageText)
+}
+
+// RenderPageInDPI counts the rendered pages it returns and wraps each one's
+// cleanup function to count releases. The wrapped cleanup clears the pixel
+// buffer before PDFium destroys the bitmap, so an image read after its release
+// comes out fully transparent instead of as the rendered page.
+func (f *faultInjectingPdfium) RenderPageInDPI(req *requests.RenderPageInDPI) (*responses.RenderPageInDPI, error) {
+	resp, err := inject(f, "RenderPageInDPI", req, f.Pdfium.RenderPageInDPI)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	rgba, ok := resp.Result.RenderedImage.(*image.RGBA)
+	if !ok {
+		resp.Cleanup()
+		return nil, fmt.Errorf("rendered image is %T, want *image.RGBA", resp.Result.RenderedImage)
+	}
+
+	f.renders++
+	release := resp.CleanupFunc
+	resp.CleanupFunc = func() {
+		f.renderCleanups++
+		clear(rgba.Pix)
+		if release != nil {
+			release()
+		}
+	}
+	return resp, nil
 }
 
 func (f *faultInjectingPdfium) FPDFLink_Enumerate(req *requests.FPDFLink_Enumerate) (*responses.FPDFLink_Enumerate, error) {
