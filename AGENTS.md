@@ -62,7 +62,8 @@ Run the full gate before declaring a change verified:
 just check   # just lint, then just test
 ```
 
-- `just lint`: `go mod tidy -diff`, `go vet ./...`, and `golangci-lint run ./...` with the linters pinned in `.golangci.yml` (`errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`). Install the golangci-lint binary at the version pinned in `.github/workflows/ci.yml`.
+- `just lint`: `go mod tidy -diff`, `go vet ./...`, and `golangci-lint run ./...` with the linters pinned in `.golangci.yml` (`errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`) and the `gofmt` formatter, which fails on any file `gofmt -s` would change. Install the golangci-lint binary at the version pinned in `.github/workflows/ci.yml`.
+- `just fmt`: `golangci-lint fmt ./...`, which rewrites files with the same `gofmt -s` formatting the lint gate checks. `go fmt` omits `-s` and leaves simplifications that fail the gate.
 - `just test`: `go test -race -v ./...`.
 
 CI runs the same checks: the `verify` job runs tidy, build, vet, and the race-enabled tests, and the `golangci-lint` job runs golangci-lint through `golangci/golangci-lint-action`.

@@ -7,9 +7,9 @@ default:
 test:
     go test -race -v ./...
 
-# Format Go source code
+# Format Go source code with the formatters enabled in .golangci.yml
 fmt:
-    go fmt ./...
+    golangci-lint fmt ./...
 
 # Check module hygiene, then run vet and golangci-lint
 lint:
