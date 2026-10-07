@@ -3,6 +3,7 @@ package render
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/draw"
@@ -53,7 +54,7 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to render PDF page %d at %d DPI: %w", pageIdx, dpi, err)
 	}
-	bgImg := renderResp.Result.Image
+	bgImg := renderResp.Result.RenderedImage
 
 	// 2. If no rm stroke bytes are provided, encode and return the background PDF page directly
 	if len(rmBytes) == 0 {
@@ -93,21 +94,9 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	widthPx := uint32(bgBounds.Dx())
 	heightPx := uint32(bgBounds.Dy())
 
-	ctx, err := resvg.NewContext(context.Background())
+	strokePng, err := rasterizeSVG([]byte(svgStr), widthPx, heightPx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create resvg context: %w", err)
-	}
-	defer ctx.Close()
-
-	renderer, err := ctx.NewRenderer()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create resvg renderer: %w", err)
-	}
-	defer renderer.Close()
-
-	strokePng, err := renderer.RenderWithSize([]byte(svgStr), widthPx, heightPx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to rasterize stroke SVG: %w", err)
+		return nil, err
 	}
 
 	strokeImg, err := png.Decode(bytes.NewReader(strokePng))
@@ -127,4 +116,36 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	}
 
 	return out.Bytes(), nil
+}
+
+// rasterizeSVG renders svg to PNG bytes of exactly widthPx by heightPx pixels
+// in a resvg WebAssembly runtime that lives only for this call. The runtime is
+// closed on every path, and a failure to close it is returned.
+//
+// The renderer is not closed on its own: resvg-go v0.0.1's Renderer.Close
+// calls the module's __renderer_delete export without the renderer pointer it
+// requires, so it always fails with "expected 1 params, but passed 0" and frees
+// nothing. The renderer lives in the runtime's module memory, which closing the
+// runtime releases.
+func rasterizeSVG(svg []byte, widthPx, heightPx uint32) (pngBytes []byte, err error) {
+	rctx, err := resvg.NewContext(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create resvg context: %w", err)
+	}
+	defer func() {
+		if closeErr := rctx.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing resvg context: %w", closeErr))
+		}
+	}()
+
+	renderer, err := rctx.NewRenderer()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create resvg renderer: %w", err)
+	}
+
+	pngBytes, err = renderer.RenderWithSize(svg, widthPx, heightPx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to rasterize stroke SVG: %w", err)
+	}
+	return pngBytes, nil
 }
