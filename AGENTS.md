@@ -9,17 +9,17 @@ Instructions, architectural rules, and test verification standards for agents wo
 `go-remarkable-render` (`github.com/alexgorbatchev/go-remarkable-render`) is a high-performance Go library for compositing reMarkable tablet stationery background PDFs with vector `.rm` stroke layers to high-resolution PNGs. It provides:
 
 1. **Planner Date Indexing (`IndexPlannerDates`)**:
-   Scans reMarkable planner template PDF pages, extracts text with `go-fitz` (MuPDF), and indexes dates matching `"Month Day Weekday Notes/Day"` into a two-level map: `map[YYYY-MM-DD]map[day|notes]pageIdx`.
+   Scans reMarkable planner template PDF pages, extracts each page's text with PDFium (`GetPageText`), and indexes dates matching `"Month Day Weekday Notes/Day"` into a two-level map: `map[YYYY-MM-DD]map[day|notes]pageIdx`.
 2. **Layered Page Compositing (`RenderPlannerPage`)**:
-   Renders background template PDF pages at a target DPI using `go-fitz`. When vector stroke bytes (`.rm`) are provided, converts strokes into layered SVG via `go-rmscene`, rasterizes them to exact pixel dimensions using `resvg-go` (WASM resvg engine), and composites the stroke layer over the PDF background with `image/draw`.
+   Renders background template PDF pages at a target DPI with PDFium (`RenderPageInDPI`). When vector stroke bytes (`.rm`) are provided, converts strokes into layered SVG via `go-rmscene`, rasterizes them to exact pixel dimensions using `resvg-go` (WASM resvg engine), and composites the stroke layer over the PDF background with `image/draw`.
 
 ---
 
 ## Core Dependencies
 
 - `github.com/alexgorbatchev/go-rmscene`: reMarkable version 6 `.rm` binary stroke parser and layered vector SVG generator.
-- `github.com/gen2brain/go-fitz`: High-speed MuPDF rendering engine in Go for PDF rasterization and text extraction.
-- `github.com/kanrichan/resvg-go`: High-fidelity SVG rasterizer using resvg compiled to WebAssembly via Wazero.
+- `github.com/klippa-app/go-pdfium`: PDFium compiled to WebAssembly and run in-process by `github.com/tetratelabs/wazero` (no cgo), used through its `webassembly` pool for PDF rasterization, page text, and link extraction.
+- `github.com/kanrichan/resvg-go`: High-fidelity SVG rasterizer using resvg compiled to WebAssembly via Wazero. In v0.0.1, `Renderer.Close` calls the `__renderer_delete` export without the renderer pointer, so it always fails and frees nothing. Never call it, and never discard its error to satisfy errcheck; the renderer is released with the module memory when the `resvg.Context` is closed.
 
 ---
 
@@ -27,11 +27,11 @@ Instructions, architectural rules, and test verification standards for agents wo
 
 ### 1. Flexible Document Input Contract
 Functions accepting `pdfDocOrPath` (`RenderPlannerPage`, `IndexPlannerDates`) MUST accept:
-- `*fitz.Document`: Caller-managed active document. The library MUST NOT close this document.
-- `string`: File path on disk. Opened via `fitz.New`, closed on return.
-- `[]byte`: In-memory PDF byte slice. Opened via `fitz.NewFromMemory`, closed on return.
-- `io.Reader`: Streaming reader. Opened via `fitz.NewFromReader`, closed on return.
-Any other type or `nil` must return `ErrInvalidDocument`.
+- `*Document`: Caller-managed document from `OpenDocumentFromBytes`. The library MUST NOT close this document; the caller releases it with the cleanup function returned alongside it.
+- `string`: File path on disk. Read with `os.ReadFile`, opened via `OpenDocumentFromBytes`, closed on return.
+- `[]byte`: In-memory PDF byte slice. Opened via `OpenDocumentFromBytes`, closed on return.
+- `io.Reader`: Streaming reader. Read with `io.ReadAll`, opened via `OpenDocumentFromBytes`, closed on return.
+Any other type, `nil`, or a nil `*Document` must return `ErrInvalidDocument`.
 
 ### 2. Exact Pixel Alignment & Compositing
 - When rasterizing stroke SVGs with `resvg-go`, the dimensions passed to `renderer.RenderWithSize(svg, widthPx, heightPx)` MUST match the exact pixel bounds of the rasterized PDF background (`bgImg.Bounds().Dx()`, `bgImg.Bounds().Dy()`).
@@ -51,17 +51,15 @@ Any other type or `nil` must return `ErrInvalidDocument`.
 ## Testing & Verification Standards
 
 ### 1. Running Tests
-Run the test suite using `just`:
+Run the full gate before declaring a change verified:
 ```sh
-just test
-# Or directly:
-go test -v ./...
+just check   # just lint, then just test
 ```
 
-Run linter / checks:
-```sh
-just check
-```
+- `just lint`: `go mod tidy -diff`, `go vet ./...`, and `golangci-lint run ./...` with the linters pinned in `.golangci.yml` (`errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`). Install the golangci-lint binary at the version pinned in `.github/workflows/ci.yml`.
+- `just test`: `go test -race -v ./...`.
+
+CI runs the same checks: the `verify` job runs tidy, build, vet, and the race-enabled tests, and the `golangci-lint` job runs golangci-lint through `golangci/golangci-lint-action`.
 
 ### 2. Code Coverage
 - 90% statement code coverage is required across exported packages.
@@ -72,5 +70,5 @@ just check
 - `TestIndexPlannerDates_Errors`: Validates negative/zero year, nil document, unsupported types, corrupt files.
 - `TestRenderPlannerPage_EmptyStrokes`: Validates nil and zero-length byte slices produce valid PNGs matching target DPI dimensions.
 - `TestRenderPlannerPage_SampleStrokes`: Constructs v6 `.rm` streams with ballpoint and Paper Pro highlighter strokes, verifying composited PNG pixel differences against background-only renders.
-- `TestRenderPlannerPage_DocumentInputs`: Tests `*fitz.Document`, file path, and `io.Reader` inputs.
+- `TestRenderPlannerPage_DocumentInputs`: Tests `*Document`, file path, and `io.Reader` inputs.
 - `TestRenderPlannerPage_Errors`: Tests invalid page bounds, malformed `.rm` bytes, corrupt PDFs, and unsupported types.
