@@ -28,3 +28,7 @@ generate-golden:
 # Clean build artifacts and coverage files
 clean:
     rm -rf bin coverage.out coverage.html .tmp *.test
+
+# Download project dependencies for local development
+setup:
+    go mod download
