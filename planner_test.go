@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/alexgorbatchev/go-remarkable-render"
@@ -154,27 +156,79 @@ func TestIndexPlannerDates_Errors(t *testing.T) {
 }
 
 func TestIndexPlannerDates_RealPDF(t *testing.T) {
-	realPDF := "/Users/agorbatchev/development/envoy.com/.workspace/.tmp/remarkable/0e40ea7e-2ee9-4f96-80cc-a7e11f28c53a-2026-09-28T21-05-50-128Z.pdf"
-	if _, err := os.Stat(realPDF); os.IsNotExist(err) {
-		t.Skip("skipping real planner PDF test: file not present")
+	realPDF := "testdata/oct1_notes_template.pdf"
+	data, err := os.ReadFile(realPDF)
+	if err != nil {
+		t.Fatal(err)
 	}
-
+	doc, cleanup, err := render.OpenDocumentFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	text, err := doc.Text(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(text, "Oct 1 Fri 2") {
+		t.Fatalf("unexpected fixture header: %q", text)
+	}
 	indexed, err := render.IndexPlannerDates(realPDF, 2026)
 	if err != nil {
 		t.Fatalf("failed to index real PDF: %v", err)
 	}
 
-	if len(indexed) < 250 {
-		t.Errorf("expected at least 250 indexed dates in real planner, got %d", len(indexed))
+	want := map[string]map[string]int{"2026-10-01": {"notes": 0}}
+	if !reflect.DeepEqual(indexed, want) {
+		t.Errorf("index = %v, want %v", indexed, want)
 	}
+}
 
-	jan1 := indexed["2026-01-01"]
-	if jan1 == nil || jan1["day"] != 1 || jan1["notes"] != 262 {
-		t.Errorf("unexpected indexing for 2026-01-01: %v", jan1)
+func TestIndexPlannerDates_HeaderValidity(t *testing.T) {
+	tests := []struct {
+		name  string
+		year  int
+		lines []string
+		date  string
+	}{
+		{"leap day", 2024, []string{"Feb 29 Thursday Notes"}, "2024-02-29"},
+		{"non leap day", 2026, []string{"Feb 29 Sunday Notes"}, ""},
+		{"impossible February", 2026, []string{"Feb 31 Tuesday Notes"}, ""},
+		{"impossible April", 2026, []string{"Apr 31 Thursday Notes"}, ""},
+		{"body marker and weekday", 2026, []string{"Apr 5", "Meeting agenda", "Day trip on Sunday"}, ""},
+		{"body weekday", 2026, []string{"Jun 7 Notes", "Weekly review", "Sunday"}, ""},
+		{"body marker", 2026, []string{"Jun 7 Sunday", "Notes"}, ""},
+		{"holiday name", 2026, []string{"Jan 1 Thursday New Year's Day Notes"}, "2026-01-01"},
+		{"navigation header", 2026, []string{"Oct 1 Fri 2 Mon 5", "Thursday Notes 2026"}, "2026-10-01"},
+		{"invalid navigation day", 2026, []string{"Oct 1 Fri 99", "Thursday Notes"}, ""},
+		{"invalid navigation number", 2026, []string{"Oct 1 Fri two", "Thursday Notes"}, ""},
+		{"navigation with body text", 2026, []string{"Oct 1 Fri 2", "Meeting", "Thursday Notes"}, ""},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := render.IndexPlannerDates(buildMinimalPDF(tt.lines), tt.year)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]map[string]int{}
+			if tt.date != "" {
+				want[tt.date] = map[string]int{"day": 0}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("index = %v, want %v", got, want)
+			}
+		})
+	}
+}
 
-	sep28 := indexed["2026-09-28"]
-	if sep28 == nil || sep28["day"] != 193 || sep28["notes"] != 454 {
-		t.Errorf("unexpected indexing for 2026-09-28: %v", sep28)
+func TestIndexPlannerDates_DuplicateViews(t *testing.T) {
+	for _, marker := range []string{"Notes", "Day"} {
+		t.Run(marker, func(t *testing.T) {
+			header := []string{"Mar 3 Tuesday " + marker}
+			got, err := render.IndexPlannerDates(buildMinimalPDF([]string{"Overview"}, header, header), 2026)
+			if got != nil || err == nil || !strings.Contains(err.Error(), "2026-03-03") || !strings.Contains(err.Error(), "pages 1 and 2") {
+				t.Fatalf("index = %v, error = %v; want nil index and collision naming both pages and date", got, err)
+			}
+		})
 	}
 }

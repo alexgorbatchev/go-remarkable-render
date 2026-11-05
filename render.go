@@ -3,10 +3,12 @@ package render
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/draw"
 	"image/png"
+	"math"
 
 	"github.com/alexgorbatchev/go-rmscene"
 	"github.com/kanrichan/resvg-go"
@@ -23,6 +25,8 @@ const (
 // rmscene.RenderRMToSVG, rasterizes the SVG to exact page pixel dimensions with resvg-go,
 // and composites the stroke layer over the PDF background using image/draw.
 // Returns the final composited image as encoded PNG bytes.
+// With strokes, unreadable, nonpositive or nonfinite PDF page dimensions
+// return an error instead of substituting a default SVG viewport.
 //
 // Accepts *Document, string (file path), []byte, or io.Reader for pdfDocOrPath.
 func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) ([]byte, error) {
@@ -41,19 +45,19 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	}
 
 	// 1. Render background PDF page to image at target DPI
-	renderResp, err := doc.instance.RenderPageInDPI(&requests.RenderPageInDPI{
-		Page: requests.Page{
-			ByIndex: &requests.PageByIndex{
-				Document: doc.handle.Document,
-				Index:    pageIdx,
-			},
-		},
-		DPI: dpi,
-	})
+	renderResp, err := pdfiumResponse(doc.instance.RenderPageInDPI(&requests.RenderPageInDPI{
+		Page: doc.page(pageIdx),
+		DPI:  dpi,
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("failed to render PDF page %d at %d DPI: %w", pageIdx, dpi, err)
 	}
-	bgImg := renderResp.Result.Image
+	// In WebAssembly the image is a view of the bitmap in the instance's
+	// memory, and only Cleanup destroys that bitmap. Deferring it here
+	// releases the bitmap on every return path, after the last read of bgImg,
+	// so a reused *Document does not accumulate one bitmap per render.
+	defer renderResp.Cleanup()
+	bgImg := renderResp.Result.RenderedImage
 
 	// 2. If no rm stroke bytes are provided, encode and return the background PDF page directly
 	if len(rmBytes) == 0 {
@@ -65,21 +69,15 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	}
 
 	// 3. Obtain page dimensions in points for SVG viewport
-	pageSizeResp, err := doc.instance.GetPageSize(&requests.GetPageSize{
-		Page: requests.Page{
-			ByIndex: &requests.PageByIndex{
-				Document: doc.handle.Document,
-				Index:    pageIdx,
-			},
-		},
-	})
-	var widthPt, heightPt float64
-	if err == nil && pageSizeResp != nil && pageSizeResp.Width > 0 && pageSizeResp.Height > 0 {
-		widthPt = pageSizeResp.Width
-		heightPt = pageSizeResp.Height
-	} else {
-		widthPt = rmscene.DefaultWidthPt
-		heightPt = rmscene.DefaultHeightPt
+	pageSizeResp, err := pdfiumResponse(doc.instance.GetPageSize(&requests.GetPageSize{
+		Page: doc.page(pageIdx),
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("getting dimensions of PDF page %d: %w", pageIdx, err)
+	}
+	widthPt, heightPt := pageSizeResp.Width, pageSizeResp.Height
+	if widthPt <= 0 || heightPt <= 0 || math.IsNaN(widthPt) || math.IsNaN(heightPt) || math.IsInf(widthPt, 0) || math.IsInf(heightPt, 0) {
+		return nil, fmt.Errorf("invalid dimensions of PDF page %d: %g x %g points", pageIdx, widthPt, heightPt)
 	}
 
 	// 4. Render .rm bytes to layered SVG
@@ -93,21 +91,9 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	widthPx := uint32(bgBounds.Dx())
 	heightPx := uint32(bgBounds.Dy())
 
-	ctx, err := resvg.NewContext(context.Background())
+	strokePng, err := rasterizeSVG([]byte(svgStr), widthPx, heightPx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create resvg context: %w", err)
-	}
-	defer ctx.Close()
-
-	renderer, err := ctx.NewRenderer()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create resvg renderer: %w", err)
-	}
-	defer renderer.Close()
-
-	strokePng, err := renderer.RenderWithSize([]byte(svgStr), widthPx, heightPx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to rasterize stroke SVG: %w", err)
+		return nil, err
 	}
 
 	strokeImg, err := png.Decode(bytes.NewReader(strokePng))
@@ -127,4 +113,36 @@ func RenderPlannerPage(pdfDocOrPath any, pageIdx int, rmBytes []byte, dpi int) (
 	}
 
 	return out.Bytes(), nil
+}
+
+// rasterizeSVG renders svg to PNG bytes of exactly widthPx by heightPx pixels
+// in a resvg WebAssembly runtime that lives only for this call. The runtime is
+// closed on every path, and a failure to close it is returned.
+//
+// The renderer is not closed on its own: resvg-go v0.0.1's Renderer.Close
+// calls the module's __renderer_delete export without the renderer pointer it
+// requires, so it always fails with "expected 1 params, but passed 0" and frees
+// nothing. The renderer lives in the runtime's module memory, which closing the
+// runtime releases.
+func rasterizeSVG(svg []byte, widthPx, heightPx uint32) (pngBytes []byte, err error) {
+	rctx, err := resvg.NewContext(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create resvg context: %w", err)
+	}
+	defer func() {
+		if closeErr := rctx.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing resvg context: %w", closeErr))
+		}
+	}()
+
+	renderer, err := rctx.NewRenderer()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create resvg renderer: %w", err)
+	}
+
+	pngBytes, err = renderer.RenderWithSize(svg, widthPx, heightPx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to rasterize stroke SVG: %w", err)
+	}
+	return pngBytes, nil
 }

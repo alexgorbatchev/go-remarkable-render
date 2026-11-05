@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"image"
 	"os"
 	"slices"
 	"strings"
@@ -113,7 +114,12 @@ func buildLinkPDF(base string) []byte {
 		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(astralToUnicodeCMap), astralToUnicodeCMap),
 		"<< /Type /Annot /Subtype /Link /Rect [95 10 150 30] /Dest [4 0 R /Fit] >>",
 	}
+	return encodePDF(objects)
+}
 
+// encodePDF serializes objects as a PDF 1.4 file whose object i+1 is
+// objects[i] and whose trailer names object 1 as the catalog.
+func encodePDF(objects []string) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("%PDF-1.4\n")
 	offsets := make([]int, len(objects))
@@ -211,15 +217,28 @@ func (f fault) String() string {
 
 // faultInjectingPdfium forwards every call to a real PDFium instance except
 // the one named method, which fails with the configured fault. It records
-// whether the document and the instance were closed, and which text pages are
-// loaded and not yet closed.
+// whether the document and the instance were closed, which text pages are
+// loaded and not yet closed, and how many rendered pages were returned and
+// released.
 type faultInjectingPdfium struct {
 	pdfium.Pdfium
-	method         string
-	fault          fault
+	method string
+	fault  fault
+	// faultPage, when set, limits a GetPageText fault to that 0-based page.
+	faultPage      *int
 	documentClosed bool
 	instanceClosed bool
 	openTextPages  map[references.FPDF_TEXTPAGE]bool
+	renders        int
+	renderCleanups int
+	pageSize       *responses.GetPageSize
+}
+
+func (f *faultInjectingPdfium) GetPageSize(req *requests.GetPageSize) (*responses.GetPageSize, error) {
+	if f.pageSize != nil {
+		return f.pageSize, nil
+	}
+	return inject(f, "GetPageSize", req, f.Pdfium.GetPageSize)
 }
 
 func (f *faultInjectingPdfium) OpenDocument(req *requests.OpenDocument) (*responses.OpenDocument, error) {
@@ -254,7 +273,37 @@ func inject[Req, Resp any](f *faultInjectingPdfium, method string, req Req, call
 }
 
 func (f *faultInjectingPdfium) GetPageText(req *requests.GetPageText) (*responses.GetPageText, error) {
+	if f.faultPage != nil && req.Page.ByIndex.Index != *f.faultPage {
+		return f.Pdfium.GetPageText(req)
+	}
 	return inject(f, "GetPageText", req, f.Pdfium.GetPageText)
+}
+
+// RenderPageInDPI counts the rendered pages it returns and wraps each one's
+// cleanup function to count releases. The wrapped cleanup clears the pixel
+// buffer before PDFium destroys the bitmap, so an image read after its release
+// comes out fully transparent instead of as the rendered page.
+func (f *faultInjectingPdfium) RenderPageInDPI(req *requests.RenderPageInDPI) (*responses.RenderPageInDPI, error) {
+	resp, err := inject(f, "RenderPageInDPI", req, f.Pdfium.RenderPageInDPI)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	rgba, ok := resp.Result.RenderedImage.(*image.RGBA)
+	if !ok {
+		resp.Cleanup()
+		return nil, fmt.Errorf("rendered image is %T, want *image.RGBA", resp.Result.RenderedImage)
+	}
+
+	f.renders++
+	release := resp.CleanupFunc
+	resp.CleanupFunc = func() {
+		f.renderCleanups++
+		clear(rgba.Pix)
+		if release != nil {
+			release()
+		}
+	}
+	return resp, nil
 }
 
 func (f *faultInjectingPdfium) FPDFLink_Enumerate(req *requests.FPDFLink_Enumerate) (*responses.FPDFLink_Enumerate, error) {

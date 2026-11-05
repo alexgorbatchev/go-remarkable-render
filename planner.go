@@ -4,8 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/klippa-app/go-pdfium/requests"
+	"time"
 )
 
 var months = map[string]int{
@@ -18,6 +17,34 @@ var weekdays = map[string]bool{
 	"Thursday": true, "Friday": true, "Saturday": true,
 }
 
+// plannerHeader accepts a single-line header or the template's two-line
+// navigation header. Only pairs of abbreviated weekdays and day numbers may
+// precede the second line; arbitrary body text cannot extend the header.
+func plannerHeader(text string) []string {
+	first, rest, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	tokens := strings.Fields(first)
+	if len(tokens) < 4 || len(tokens)%2 != 0 {
+		return tokens
+	}
+	for i := 2; i < len(tokens); i += 2 {
+		switch tokens[i] {
+		case "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat":
+		default:
+			return tokens
+		}
+		day, err := strconv.Atoi(tokens[i+1])
+		if err != nil || day < 1 || day > 31 {
+			return tokens
+		}
+	}
+	second, _, _ := strings.Cut(rest, "\n")
+	continuation := strings.Fields(second)
+	if len(continuation) < 2 || !weekdays[continuation[0]] {
+		return tokens
+	}
+	return append(tokens, continuation...)
+}
+
 // IndexPlannerDates scans the pages of a reMarkable planner template PDF and
 // indexes dates matching "Month Day Weekday Notes/Day" into a nested mapping:
 // map[YYYY-MM-DD]map[day|notes]pageIdx.
@@ -26,6 +53,17 @@ var weekdays = map[string]bool{
 // For each matching date:
 // - A page containing "Notes" in its header represents the "day" view (pointing to its notes companion).
 // - A page containing "Day" in its header represents the "notes" view (pointing back to its day companion).
+//
+// The header is the first nonempty text line. When that line starts with a
+// month and day followed only by abbreviated weekday/day navigation pairs,
+// the next line also belongs to the header if it starts with a full weekday.
+// Dates must be valid in year; printed years and weekday/date agreement are
+// not checked. Notes takes precedence over Day, including holiday names.
+// Duplicate views return an error naming both page indexes and no index.
+// A page whose text carries no valid header is skipped. A failed PDFium text
+// request for any page, including one that returns no response or one made on
+// a released *Document, returns an error naming the 0-based page index and no
+// index.
 func IndexPlannerDates(pdfDocOrPath any, year int) (map[string]map[string]int, error) {
 	if year <= 0 {
 		return nil, ErrInvalidYear
@@ -41,20 +79,12 @@ func IndexPlannerDates(pdfDocOrPath any, year int) (map[string]map[string]int, e
 	numPages := doc.NumPage()
 
 	for idx := 0; idx < numPages; idx++ {
-		textResp, err := doc.instance.GetPageText(&requests.GetPageText{
-			Page: requests.Page{
-				ByIndex: &requests.PageByIndex{
-					Document: doc.handle.Document,
-					Index:    idx,
-				},
-			},
-		})
-		if err != nil || textResp == nil {
-			continue
+		text, err := doc.Text(idx)
+		if err != nil {
+			return nil, err
 		}
-		text := textResp.Text
 
-		tokens := strings.Fields(text)
+		tokens := plannerHeader(text)
 		if len(tokens) < 3 {
 			continue
 		}
@@ -66,6 +96,10 @@ func IndexPlannerDates(pdfDocOrPath any, year int) (map[string]map[string]int, e
 
 		dayNum, err := strconv.Atoi(tokens[1])
 		if err != nil || dayNum < 1 || dayNum > 31 {
+			continue
+		}
+		date := time.Date(year, time.Month(monthIdx), dayNum, 0, 0, 0, 0, time.UTC)
+		if date.Month() != time.Month(monthIdx) || date.Day() != dayNum {
 			continue
 		}
 
@@ -91,17 +125,20 @@ func IndexPlannerDates(pdfDocOrPath any, year int) (map[string]map[string]int, e
 
 		dateKey := fmt.Sprintf("%04d-%02d-%02d", year, monthIdx, dayNum)
 
-		if hasNotes {
-			if _, ok := indexed[dateKey]; !ok {
-				indexed[dateKey] = make(map[string]int)
+		kind := "day"
+		if !hasNotes {
+			if !hasDay {
+				continue
 			}
-			indexed[dateKey]["day"] = idx
-		} else if hasDay {
-			if _, ok := indexed[dateKey]; !ok {
-				indexed[dateKey] = make(map[string]int)
-			}
-			indexed[dateKey]["notes"] = idx
+			kind = "notes"
 		}
+		if previous, exists := indexed[dateKey][kind]; exists {
+			return nil, fmt.Errorf("duplicate %s view for %s on pages %d and %d", kind, dateKey, previous, idx)
+		}
+		if indexed[dateKey] == nil {
+			indexed[dateKey] = make(map[string]int)
+		}
+		indexed[dateKey][kind] = idx
 	}
 
 	return indexed, nil

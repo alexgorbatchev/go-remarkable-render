@@ -6,6 +6,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alexgorbatchev/go-remarkable-render"
@@ -225,30 +226,23 @@ func TestRenderPlannerPage_Errors(t *testing.T) {
 	defer cleanupDoc()
 
 	docText, err := docObj.Text(0)
-	if err != nil || len(docText) == 0 {
-		t.Fatalf("doc.Text failed: %v", err)
+	if err != nil || strings.TrimSpace(docText) != "Only One Page" {
+		t.Fatalf("doc.Text = %q, %v; want Only One Page", docText, err)
 	}
-	_, _ = docObj.Text(-1)
-	_, _ = docObj.Text(999)
 
 	docLinks, err := docObj.Links(0)
 	if err != nil {
 		t.Fatalf("doc.Links failed: %v", err)
 	}
-	_ = docLinks
-	_, _ = docObj.Links(-1)
-	_, _ = docObj.Links(999)
-
-	// Test Links with real linked document
-	linkedBytes, err := os.ReadFile("testdata/linked_pages.pdf")
-	if err == nil {
-		linkedDoc, cleanupLinked, err := render.OpenDocumentFromBytes(linkedBytes)
-		if err == nil {
-			defer cleanupLinked()
-			links, err := linkedDoc.Links(0)
-			if err == nil && len(links) > 0 {
-				_ = links[0].TargetPage
-			}
+	if len(docLinks) != 0 {
+		t.Fatalf("unlinked page has links: %v", docLinks)
+	}
+	for _, page := range []int{-1, 999} {
+		if _, err := docObj.Text(page); !errors.Is(err, render.ErrPageOutOfBounds) {
+			t.Errorf("Text(%d) error = %v", page, err)
+		}
+		if _, err := docObj.Links(page); !errors.Is(err, render.ErrPageOutOfBounds) {
+			t.Errorf("Links(%d) error = %v", page, err)
 		}
 	}
 

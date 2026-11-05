@@ -18,10 +18,6 @@ func TestE2E_RenderGoldenComparison(t *testing.T) {
 	rmPath := filepath.Join(testdataDir, "oct1_notes_strokes.rm")
 	goldenPath := filepath.Join(testdataDir, "oct1_notes_golden.png")
 
-	if _, err := os.Stat(pdfPath); err != nil {
-		t.Skipf("skipping E2E test, fixture not found: %v", err)
-	}
-
 	rmBytes, err := os.ReadFile(rmPath)
 	if err != nil {
 		t.Fatalf("failed to read .rm fixture: %v", err)
