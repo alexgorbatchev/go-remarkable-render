@@ -20,14 +20,16 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Check module hygiene
-        run: go mod tidy -diff
+      - uses: extractions/setup-just@v4
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          install-only: true
 
       - name: Build
         run: go build ./...
 
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test -race -v ./...
+      - name: Check
+        run: just check
